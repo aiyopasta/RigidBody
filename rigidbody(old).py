@@ -19,8 +19,14 @@ w.pack()
 
 
 # Coordinate Shift
-def A(x, y):
-    return np.array([x + window_w/2, -y + window_h/2])
+def A(pt: np.ndarray):
+    assert len(pt) == 2
+    return (pt * np.array([1, -1])) + np.array([window_w/2, window_h/2])
+
+
+def Ainv(pt: np.ndarray):
+    assert len(pt) == 2
+    return (pt - np.array([window_w/2, window_h/2])) * np.array([1, -1])
 
 
 # Helper functions
@@ -89,15 +95,15 @@ class RigidBody:
             # Rotate about center of mass
             loc = np.dot(rotmat(self.theta), p - self.centroid) + self.centroid + self.xy
             if screen_space:
-                points.extend(A(*loc))
+                points.extend(A(loc))
             else:
                 points.extend(loc)
 
         return points
 
     def get_centroid_points(self, radius=5):
-        return [*A(self.centroid[0] - radius + self.xy[0], self.centroid[1] - radius + self.xy[1]),
-                *A(self.centroid[0] + radius + self.xy[0], self.centroid[1] + radius + self.xy[1])]
+        return [*A(self.centroid - radius + self.xy),
+                *A(self.centroid + radius + self.xy)]
 
 
 # Create regular ngon rigid bodies
