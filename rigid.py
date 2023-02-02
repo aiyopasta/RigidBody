@@ -84,7 +84,8 @@ class RigidBody:
         points = []
         for p in self.points:
             # Rotate about center of mass
-            loc = np.dot(R(self.theta), p - self.centroid) + self.centroid + self.xy
+            xy = Ainv(A(self.xy) % [window_w, window_h])
+            loc = np.dot(R(self.theta), p - self.centroid) + self.centroid + xy
             if screen_space:
                 points.extend(A(loc))
             else:
@@ -93,8 +94,9 @@ class RigidBody:
         return points
 
     def get_centroid_points(self, radius=5):
-        return [*A(self.centroid - radius + self.xy),
-                *A(self.centroid + radius + self.xy)]
+        xy = Ainv(A(self.xy) % [window_w, window_h])
+        return [*A(self.centroid - radius + xy),
+                *A(self.centroid + radius + xy)]
 
     def solve(self, h, const_a=np.array([0,0]), const_alpha=0.):
         params = [h, const_a, const_alpha]
@@ -166,74 +168,89 @@ def regular_ngon_verts(n_sides, sidelen=50):
 mode = 0   # 0 = Unconstrained rigid bodies (no forces)
 
 # Bells and whistles 🔔
-mode_text = ['Unconstrained (Integrator is exact)']
-instructions = ['Click anywhere to spawn rigid body. \'G\' to toggle constant gravity.']
+mode_text = ['EXPERIMENT: Constant Velocity / Acceleration Integration']
+mode_subtext = ['Constant Velocity: All will tie. Constant Acceleration: Semi-implicit gains extra energy and wins!']
+instructions = ['Click anywhere to spawn 4 rigid bodies, one per integrator. \'G\' to toggle between space-mode and competition-mode.']
 
 # Mode 0 parameters
-gravity = False
+gravity = True
+frame = 0
+max_frame = 400
 
 # Universal parameters 🌎
 bodies = []
 
 # Simulation params
-dt = 1. / 30.  # 60 fps
+dt = 1. / 60.  # 60 fps
 
 
 # Main function
 def run():
-    global dt, mode, bodies, gravity
+    global dt, frame, max_frame, mode, bodies, gravity, mode_subtext
     w.configure(background='black')
 
     # Prep
     if mode == 0:
         pass
 
-    counter = 0
-    l0, l1, l2, l3 = [], [], [], []
-    l = [l0, l1, l2, l3]
-    while counter < 500:
-        counter += 1
-        print(counter)
+    while True:
         w.delete('all')
+        if len(bodies) > 0 and gravity:
+            frame += 1
+
         # Update Model
         if mode == 0:
             for i, body in enumerate(bodies):
-                g = np.array([0.0, -1000.0]) if gravity else np.array([0, 0])
-                body.solve(dt, const_a=g)
-                l[i].append(body.get_centroid_points()[1])
-                # if body.xy[1] < -window_h/2:
-                #     bodies.remove(body)
+                g = np.array([0, 0])
+                if gravity:
+                    g = np.array([0.0, -1000.0])
+                    if frame < max_frame:
+                        body.solve(dt, const_a=g)
+                    elif frame > max_frame + 100:
+                        bodies.clear()
+                        frame = 0
+                        break
+                else:
+                    body.solve(dt, const_a=g)
+                    offscreen = abs(body.xy[0]) >= window_w/2 or abs(body.xy[1]) >= window_h/2
+                    if offscreen:
+                        bodies.remove(body)
 
         # Paint scene
         # Show labels
-        w.create_text(window_w/2, 40, text='Mode: '+str(mode_text[mode]), fill='white', font='Avenir 25')
-        w.create_text(window_w/2, window_h-50, text=instructions[mode], fill='yellow', font='Avenir 20')
+        w.create_text(window_w/2, 40, text=mode_text[mode], fill='white', font='Avenir 30')
+        w.create_text(window_w/2, window_h-50, text=mode_subtext[mode], fill='gray', font='Avenir 20')
+        w.create_text(window_w / 2, 80, text=instructions[mode], fill='gray', font='Avenir 20')
         # Mode specific painting
         if mode == 0:
             for body in bodies:
                 color = 'red' if body.solver_id <= 1 else 'blue'
-                w.create_text(*(A(body.xy) - np.array([0, 60])), text=str(body.solver_id), fill=color, font='Avenir 25')
+                w.create_text(*(A(body.xy) % [window_w, window_h] - np.array([0, 60])), text=str(body.solver_id), fill=color, font='Avenir 25')
                 w.create_polygon(*body.get_poly_points(), fill=color, outline='white')
                 w.create_oval(body.get_centroid_points(), fill='blue')
+
+            if gravity:
+                if frame < max_frame:
+                    w.create_text(window_w / 2, window_h / 2, text='Competition Mode: Frame #'+str(frame) + '/'+str(max_frame), font='Avenir 50', fill='white')
+                elif frame < max_frame + 100:
+                    winner_id = bodies[np.argmin([body.xy[1] for body in bodies])].solver_id
+                    w.create_text(window_w/2, window_h/2, text=('Semi-implicit Euler (Blues)' if winner_id>=2 else 'Exact Solution (Reds)') + ' win!', font='Avenir 50', fill='white')
+            else:
+                w.create_text(window_w / 2, window_h / 2, text='Space mode (constant velocity, so all methods match exactly!)', font='Avenir 50', fill='white')
 
         # End run
         w.update()
         time.sleep(dt)
-
-    colors = ['blue', 'red', 'green', 'yellow']
-    for i, li in enumerate(l):
-        plt.plot(np.arange(len(li) - int(counter/10), len(li)), li[len(li) - int(counter/10):len(li)], color=colors[i])
-
-    plt.show()
 
 
 
 
 # Key bind
 def key_pressed(event):
-    global gravity
+    global gravity, bodies
     if mode == 0:
         if event.char == 'g':
+            bodies.clear()
             gravity = not gravity
 
         # else:
@@ -242,20 +259,21 @@ def key_pressed(event):
 
 # MOUSE + KEY METHODS ————————————————————————————————————————————————
 def mouse_click(event):
-    global mode, bodies
+    global mode, gravity, frame, bodies
     clicked_pt = Ainv(np.array([event.x, event.y]))
-    if mode == 0:
+    if mode == 0 and ((len(bodies) == 0 and gravity) or (not gravity)):
+        frame = 0
         # Sample random initial velocities and shape
         sidelen = 50
         rng_v = (np.random.random(2) - 0.5) * 300.0     # arbitrary max mag
         rng_theta = np.random.random() * 2 * np.pi      # arbitrary max mag
         rng_omega = (np.random.random() - 0.5) * 5.0    # arbitrary max mag
         rng_sides = np.random.randint(3, 11)            # arbitrary range
-        verts = regular_ngon_verts(rng_sides, sidelen=sidelen) #+ np.ran
+        verts = regular_ngon_verts(rng_sides, sidelen=sidelen) #+ np.random
         # Create four duplicates of this sample in a line, but each has a different integration scheme
         spacing = np.array([20.0 + (sidelen / np.sin(np.pi / rng_sides)), 0])  # from centroid to centroid. formula is for diameter of a /regular/ poly (good approx) plus some offset
         for i in range(4):
-            xy = clicked_pt# + (-1.5 * spacing) + (i * spacing)
+            xy = clicked_pt + (-1.5 * spacing) + (i * spacing)
             body = RigidBody(verts, init_xy=copy.copy(xy), init_v=copy.copy(rng_v), init_theta=copy.copy(rng_theta), init_omega=copy.copy(rng_omega), solver_id=i)
             bodies.append(body)
 
