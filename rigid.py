@@ -101,15 +101,31 @@ class RigidBody:
     def solve(self, h, const_a=np.array([0,0]), const_alpha=0.):
         params = [h, const_a, const_alpha]
         if self.solver_id == 0:
-            self.solve_exact_tk(*params)
+            self.solve_forward_euler(*params)
         elif self.solver_id == 1:
-            self.solve_exact_t0(*params)
+            self.solve_exact_tk(*params)
         elif self.solver_id == 2:
+            self.solve_exact_t0(*params)
+        elif self.solver_id == 3:
             self.solve_sieuler_naive(*params)
         else:
             self.solve_sieuler_expanded(*params)
 
-    # Exact solution for 2nd or 1st order ODE (linear or quadratic), using Taylor expansion at CURRENT TIME STEP.
+    # BELOW LIE ALL THE EXPLICIT INTEGRATORS (THEY USE ACCELERATION INFO FROM THE PREVIOUS FRAME!
+    # —————————————————————————————————————————————————————————————————————————————————————————————
+    # 1) Meme solution for 2nd or 1st order ODE —— Euler's Method
+    def solve_forward_euler(self, h, const_a=np.array([0,0]), const_alpha=0.):
+        # Here, it's a meme method because we use the OLD vel instead of computing a new one,
+        # which means (as you know from contrasting with the expanded semi-implicit Euler)
+        # that we're only using a bad FIRST order guess here. Even though s.i. does not make a
+        # proper first order guess either, it's at least second order as a poly in h. (It's also symplectic.)
+        self.xy += h * self.v         # Use the old velocity
+        self.theta += h * self.omega  # And the old omega
+        self.v += h * const_a
+        self.omega += h * const_alpha  # (And obviously old accelerations, as this is an explicit method)
+
+    # 2) Exact solution for 2nd or 1st order ODE (linear or quadratic), using Taylor expansion at CURRENT TIME STEP.
+    #    This is also the TRAPEZOID RULE (2nd order) Runge Kutta method! (The one we used in 562 as well.)
     def solve_exact_tk(self, h, const_a=np.array([0,0]), const_alpha=0.):
         # Exact solution from truncated Taylor expansion of x at t_{k+1} = t_k + h, namely:
         # x(t_{k+1}) = x(t_k) + h*xdot(t_k) + h^2/2! * xddot(t_k).
@@ -122,7 +138,7 @@ class RigidBody:
         self.v += h * const_a
         self.omega += h * const_alpha
 
-    # Exact solution for 2nd or 1st order ODE (linear or quadratic), using Taylor expansion at INITIAL TIME STEP.
+    # 3) Exact solution for 2nd or 1st order ODE (linear or quadratic), using Taylor expansion at INITIAL TIME STEP.
     def solve_exact_t0(self, h, const_a=np.array([0,0]), const_alpha=0.):
         self.n += 1
         elapsed_t = h * self.n
@@ -136,16 +152,16 @@ class RigidBody:
         self.v = self.v_0 + (elapsed_t * const_a)
         self.omega = self.omega_0 + (elapsed_t * const_alpha)
 
-    # The naive, inexact update everyone (including me) usually does when acceleration is constant.
-    # S.I. = "semi-implicit Euler"
+    # 4) The naive, inexact update everyone (including me) usually does when acceleration is constant.
+    #    S.I. = "semi-implicit Euler"
     def solve_sieuler_naive(self, h, const_a=np.array([0,0]), const_alpha=0.):
         self.v += h * const_a
         self.xy += h * self.v  # = (self.v_old * h) + (h^2 * const_a), which is inexact (missing a factor of 1/2!).
         self.omega += h * const_alpha
         self.theta += h * self.omega
 
-    # Expanded version of the naive, inexact update that everyone (including me) does when acceleration is constant.
-    # S.I. = "semi-implicit Euler"
+    # 5) Expanded version of the naive, inexact update that everyone (including me) does when acceleration is constant.
+    #    S.I. = "semi-implicit Euler"
     def solve_sieuler_expanded(self, h, const_a=np.array([0,0]), const_alpha=0.):
         self.xy += (h * self.v) + (np.power(h, 2.0) * const_a)  # inexact, missing factor of 1/2!
         self.theta += (h * self.omega) + (np.power(h, 2.0) * const_alpha)
@@ -168,14 +184,17 @@ def regular_ngon_verts(n_sides, sidelen=50):
 mode = 0   # 0 = Unconstrained rigid bodies (no forces)
 
 # Bells and whistles 🔔
-mode_text = ['EXPERIMENT: Constant Velocity / Acceleration Integration']
-mode_subtext = ['Constant Velocity: All will tie. Constant Acceleration: Semi-implicit gains extra energy and wins!']
-instructions = ['Click anywhere to spawn 4 rigid bodies, one per integrator. \'G\' to toggle between space-mode and competition-mode.']
+mode_text = ['EXPERIMENT #1: Constant Velocity / Acceleration Integration', 'EXPERIMENT #2: Non-constant Force Integration']
+mode_subtext = ['Constant Velocity: All will tie. Constant Acceleration: Semi-implicit gains extra energy and wins, while Euler strays behind the actual solution!', 'Comparison between: 1) Forward Euler (Meme), 2) Verlet (Explicit), 3) Backward Euler (Pixar), 3) Semi-Implicit (Explicit, really)']
+instructions = ['Click anywhere to spawn 5 rigid bodies, one per integrator. \'G\' to toggle between space-mode and competition-mode.', 'Instructions: idk lol']
 
 # Mode 0 parameters
 gravity = True
 frame = 0
 max_frame = 400
+
+# Mode 1 parameters
+G = 6.67E-11  # gravitational constant
 
 # Universal parameters 🌎
 bodies = []
@@ -216,6 +235,9 @@ def run():
                     if offscreen:
                         bodies.remove(body)
 
+        elif mode == 1:
+            pass
+
         # Paint scene
         # Show labels
         w.create_text(window_w/2, 40, text=mode_text[mode], fill='white', font='Avenir 30')
@@ -224,7 +246,11 @@ def run():
         # Mode specific painting
         if mode == 0:
             for body in bodies:
-                color = 'red' if body.solver_id <= 1 else 'blue'
+                color = 'red'
+                if 1 <= body.solver_id <= 2:
+                    color = 'blue'
+                elif body.solver_id >= 3:
+                    color = 'green'
                 w.create_text(*(A(body.xy) % [window_w, window_h] - np.array([0, 60])), text=str(body.solver_id), fill=color, font='Avenir 25')
                 w.create_polygon(*body.get_poly_points(), fill=color, outline='white')
                 w.create_oval(body.get_centroid_points(), fill='blue')
@@ -233,21 +259,25 @@ def run():
                 if frame < max_frame:
                     w.create_text(window_w / 2, window_h / 2, text='Competition Mode: Frame #'+str(frame) + '/'+str(max_frame), font='Avenir 50', fill='white')
                 elif frame < max_frame + 100:
-                    winner_id = bodies[np.argmin([body.xy[1] for body in bodies])].solver_id
-                    w.create_text(window_w/2, window_h/2, text=('Semi-implicit Euler (Blues)' if winner_id>=2 else 'Exact Solution (Reds)') + ' win!', font='Avenir 50', fill='white')
+                    winner_text = '1st Place — S.I. Methods (Greens)!'
+                    w.create_text(window_w/2, window_h/2, text=winner_text, font='Avenir 50', fill='white')
             else:
                 w.create_text(window_w / 2, window_h / 2, text='Space mode (constant velocity, so all methods match exactly!)', font='Avenir 50', fill='white')
+
+        elif mode == 1:
+            pass
 
         # End run
         w.update()
         time.sleep(dt)
 
 
-
-
 # Key bind
 def key_pressed(event):
-    global gravity, bodies
+    global gravity, bodies, mode
+    if event.char == 'm':
+        mode = (mode + 1) % 2
+
     if mode == 0:
         if event.char == 'g':
             bodies.clear()
@@ -272,8 +302,8 @@ def mouse_click(event):
         verts = regular_ngon_verts(rng_sides, sidelen=sidelen) #+ np.random
         # Create four duplicates of this sample in a line, but each has a different integration scheme
         spacing = np.array([20.0 + (sidelen / np.sin(np.pi / rng_sides)), 0])  # from centroid to centroid. formula is for diameter of a /regular/ poly (good approx) plus some offset
-        for i in range(4):
-            xy = clicked_pt + (-1.5 * spacing) + (i * spacing)
+        for i in range(5):
+            xy = clicked_pt + (-2 * spacing) + (i * spacing)
             body = RigidBody(verts, init_xy=copy.copy(xy), init_v=copy.copy(rng_v), init_theta=copy.copy(rng_theta), init_omega=copy.copy(rng_omega), solver_id=i)
             bodies.append(body)
 
