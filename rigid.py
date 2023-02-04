@@ -84,7 +84,7 @@ class RigidBody:
         points = []
         for p in self.points:
             # Rotate about center of mass
-            xy = Ainv(A(self.xy) % [window_w, window_h])
+            xy = self.xy#Ainv(A(self.xy) % [window_w, window_h])
             loc = np.dot(R(self.theta), p - self.centroid) + self.centroid + xy
             if screen_space:
                 points.extend(A(loc))
@@ -94,22 +94,48 @@ class RigidBody:
         return points
 
     def get_centroid_points(self, radius=5):
-        xy = Ainv(A(self.xy) % [window_w, window_h])
+        xy = self.xy #Ainv(A(self.xy) % [window_w, window_h])
         return [*A(self.centroid - radius + xy),
                 *A(self.centroid + radius + xy)]
 
-    def solve(self, h, const_a=np.array([0,0]), const_alpha=0.):
+    def KE(self):
+        return 0.5 * np.dot(self.v, self.v) * self.m
+
+    def solve(self, h, const_a=np.array([0,0]), const_alpha=0., experiment=0):
         params = [h, const_a, const_alpha]
-        if self.solver_id == 0:
-            self.solve_forward_euler(*params)
-        elif self.solver_id == 1:
-            self.solve_exact_tk(*params)
-        elif self.solver_id == 2:
-            self.solve_exact_t0(*params)
-        elif self.solver_id == 3:
-            self.solve_sieuler_naive(*params)
-        else:
-            self.solve_sieuler_expanded(*params)
+        if experiment == 0:
+            if self.solver_id == 0:
+                self.solve_forward_euler(*params)
+            elif self.solver_id == 1:
+                self.solve_exact_tk(*params)
+            elif self.solver_id == 2:
+                self.solve_exact_t0(*params)
+            elif self.solver_id == 3:
+                self.solve_sieuler_naive(*params)
+            else:
+                self.solve_sieuler_expanded(*params)
+
+        elif experiment == 1:
+            if self.solver_id == 0:
+                self.solve_forward_euler(*params)
+            elif self.solver_id == 1:
+                self.solve_RK2(*params)
+            elif self.solver_id == 2:
+                self.solve_verlet(*params)
+            elif self.solver_id == 3:
+                self.solve_sieuler_expanded(*params)  # naive will give equivalent results
+            else:
+                self.solve_backward_euler(h)
+
+    # BELOW LIE ALL THE IMPLICIT INTEGRATORS (THEY REQUIRE SOME FORM OF MATRIX INVERSION)!
+    # —————————————————————————————————————————————————————————————————————————————————————————————
+    def solve_backward_euler(self, h):
+        dfdx = vectorfield_jacobian(self.xy)
+        A = np.eye(2) - (np.power(h, 2.0) * dfdx)
+        b = vectorfield(self.xy) + (h * np.dot(dfdx, self.v))
+        self.v += h * np.dot(np.linalg.inv(A), b)
+        self.xy += h * self.v
+
 
     # BELOW LIE ALL THE EXPLICIT INTEGRATORS (THEY USE ACCELERATION INFO FROM THE PREVIOUS FRAME!
     # —————————————————————————————————————————————————————————————————————————————————————————————
@@ -123,6 +149,13 @@ class RigidBody:
         self.theta += h * self.omega  # And the old omega
         self.v += h * const_a
         self.omega += h * const_alpha  # (And obviously old accelerations, as this is an explicit method)
+
+    # Just a wrapper method! (To make clear Trapezoid rule is literally just the below.)
+    def solve_RK2(self, h, a_n, alpha_n):
+        '''
+            Here, a_n and alpha_n are the PREVIOUS time-step's accelerations as this is an EXPLICIT method.
+        '''
+        return self.solve_exact_tk(h, a_n, alpha_n)
 
     # 2) Exact solution for 2nd or 1st order ODE (linear or quadratic), using Taylor expansion at CURRENT TIME STEP.
     #    This is also the TRAPEZOID RULE (2nd order) Runge Kutta method! (The one we used in 562 as well.)
@@ -169,6 +202,17 @@ class RigidBody:
         self.v += h * const_a
         self.omega += h * const_alpha
 
+    # 6) Verlet integration (velocity verlet, as we'll store the velocities too)
+    #    Recall that normal Verlet integration does not compute velocity.
+    def solve_verlet(self, h, a_n, alpha_n):
+        # NOTE: This is for the specific vectorfield case (does not affect rotational component)
+        h_squared = np.power(h, 2.0)
+        self.xy += (h * self.v) + (0.5 * a_n * h_squared)
+        a_np1 = vectorfield(self.xy)
+        self.v += 0.5 * (a_np1 + a_n) * h
+        self.theta += (h * self.omega) + (0.5 * alpha_n * h_squared)
+        self.omega += alpha_n * h  # constant angular acceleration means 0.5 * (alpha_{n+1} + alpha_n) = alpha_n.
+
 
 # Get regular n-gon vertices
 def regular_ngon_verts(n_sides, sidelen=50):
@@ -181,20 +225,17 @@ def regular_ngon_verts(n_sides, sidelen=50):
 
 
 # Switches / Knobs 🎚
-mode = 0   # 0 = Unconstrained rigid bodies (no forces)
+mode = 1   # 0 = Unconstrained rigid bodies (no forces)
 
 # Bells and whistles 🔔
-mode_text = ['EXPERIMENT #1: Constant Velocity / Acceleration Integration', 'EXPERIMENT #2: Non-constant Force Integration']
-mode_subtext = ['Constant Velocity: All will tie. Constant Acceleration: Semi-implicit gains extra energy and wins, while Euler strays behind the actual solution!', 'Comparison between: 1) Forward Euler (Meme), 2) Verlet (Explicit), 3) Backward Euler (Pixar), 3) Semi-Implicit (Explicit, really)']
-instructions = ['Click anywhere to spawn 5 rigid bodies, one per integrator. \'G\' to toggle between space-mode and competition-mode.', 'Instructions: idk lol']
+mode_text = ['EXPERIMENT #1: Constant Velocity / Acceleration Integration',
+             'EXPERIMENT #2: Non-constant Force Integration']
 
-# Mode 0 parameters
-gravity = True
-frame = 0
-max_frame = 400
+mode_subtext = ['Constant Velocity: All will tie. Constant Acceleration: Semi-implicit gains extra energy and wins, while Euler strays behind the actual solution!',
+                '1) Red = Forward Euler, 2) Blue = RK2, 3) Green = Verlet (Velocity Version), 4) Purple = SI Euler, 5) Orange = Implicit Euler (Pixar\'s Notes)']
 
-# Mode 1 parameters
-G = 6.67E-11  # gravitational constant
+instructions = ['Click anywhere to spawn 5 rigid bodies, one per integrator. \'G\' to toggle between space-mode and competition-mode.',
+                'Instructions: Sit back and watch.']
 
 # Universal parameters 🌎
 bodies = []
@@ -202,15 +243,70 @@ bodies = []
 # Simulation params
 dt = 1. / 60.  # 60 fps
 
+# Mode 0 parameters / functions
+gravity = True
+frame = 0
+max_frame = 400
+
+
+# Mode 1 parameters / functions
+energies = []
+initial_energies = []
+const = 100000000
+epsilon = 10
+def vectorfield(xy: np.ndarray):
+    global const, epsilon
+    x, y = xy[0], xy[1]
+    r_mag = np.linalg.norm(xy)
+    factor = -const / np.power(r_mag, 3.0) if r_mag > epsilon else 0.0
+    return np.array(factor * np.array([x, y]))
+
+
+# Jacobian of vectorfield wrt to the input position
+def vectorfield_jacobian(xy: np.ndarray):
+    global const, epsilon
+    x, y, r_mag = xy[0], xy[1], np.linalg.norm(xy)
+    if r_mag <= epsilon:
+        return np.zeros((2,2))
+
+    rpower_3 = np.power(r_mag, -3.0)
+    rpower_5 = np.power(r_mag, -5.0)
+    Jrow0 = np.array([(const * rpower_3) - (3 * const * np.power(x, 2.0) * rpower_5), -3 * const * x * y * rpower_5])
+    Jrow1 = np.array([-3 * const * x * y * rpower_5, (const * rpower_3) - (3 * const * np.power(y, 2.0) * rpower_5)])
+    J = np.array([Jrow0, Jrow1])
+    return J
+
+
+def vectorfield_potential(xy: np.ndarray):
+    global const, epsilon
+    r_mag = np.linalg.norm(xy)
+    return - const / r_mag if r_mag > epsilon else 0
+
 
 # Main function
 def run():
-    global dt, frame, max_frame, mode, bodies, gravity, mode_subtext
+    global dt, frame, max_frame, mode, bodies, gravity, mode_subtext, energies, initial_energies
     w.configure(background='black')
 
     # Prep
     if mode == 0:
         pass
+
+    elif mode == 1:
+        # Create all the ghosts of the same body, but being integrated using different methods
+        n_bodies = 5     # 1) FW Euler, 2) RK2, 3) Verlet, 4) SI Euler, 5) Implicit Euler (from Pixar's notes)
+        for i in range(n_bodies):
+            xy0 = np.array([-300.0, 0.0])
+            v0 = np.array([0.0, 500.0])
+            verts = regular_ngon_verts(5)
+            body = RigidBody(verts, init_xy=xy0, init_v=v0, solver_id=i)
+            bodies.append(body)
+
+            # Store initial total energies
+            energy = (body.KE() / body.m) + vectorfield_potential(body.xy)
+            energies.append(energy)
+
+        initial_energies = copy.copy(energies)
 
     while True:
         w.delete('all')
@@ -236,7 +332,11 @@ def run():
                         bodies.remove(body)
 
         elif mode == 1:
-            pass
+            for i, body in enumerate(bodies):
+                accel = vectorfield(body.xy)
+                body.solve(dt, const_a=accel, experiment=mode)
+                energy = vectorfield_potential(body.xy) + (body.KE() / body.m)
+                energies[i] = energy
 
         # Paint scene
         # Show labels
@@ -265,7 +365,28 @@ def run():
                 w.create_text(window_w / 2, window_h / 2, text='Space mode (constant velocity, so all methods match exactly!)', font='Avenir 50', fill='white')
 
         elif mode == 1:
-            pass
+            sink_radius = 10
+            w.create_oval(window_w/2 - sink_radius, window_h/2 - sink_radius,
+                          window_w/2 + sink_radius, window_h/2 + sink_radius, fill='white')
+
+            colors = ['red', 'blue', 'green', 'purple', 'orange']
+            for i, body in enumerate(bodies):
+                col = colors[body.solver_id]
+                w.create_polygon(*body.get_poly_points(), fill=col, outline='white')
+                w.create_oval(body.get_centroid_points(), fill='blue')
+
+                # Display energies
+                width = 40
+                topleft = A(np.array([-window_w * 0.8 / 2, 0.0]) + np.array([width * i, 0]))
+                scaling = 1.0 / 1500.0
+                energy = energies[i]
+                w.create_rectangle(*topleft, *(topleft + np.array([width, energy * scaling])), fill=col)
+
+                # Display lines for initial energies
+                energy = initial_energies[i]
+                w.create_line(*(topleft + np.array([0, energy * scaling])), *(topleft + np.array([width, energy * scaling])), fill=col)
+
+
 
         # End run
         w.update()
