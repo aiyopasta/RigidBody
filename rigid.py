@@ -84,7 +84,7 @@ class RigidBody:
 
     # Compute the top-left and bottom-right of bbox
     # IN THE SHAPE'S REFERENCE FRAME! (In the usual space of (0, 0) being at the center of the screen).
-    def compute_bbox(self, fluff=30):
+    def compute_bbox(self, fluff=40):
         large = 1000000
         xy_high = np.array([-large, -large])
         xy_low = np.array([large, large])
@@ -441,7 +441,6 @@ def valid_plane(pair: frozenset, r0: np.ndarray, nor: np.ndarray):
     pts = np.reshape(raw_pts, (int(len(raw_pts) / 2), 2))
     correct_side = np.dot(nor, pts[0] - r0) > eps
     for vert in pts:
-        prod = np.dot(nor, vert - r0)
         same_side = correct_side == (np.dot(nor, vert - r0) > eps)
         if not same_side:
             return False
@@ -486,7 +485,7 @@ def find_plane(pair: frozenset):
         n = int(len(pts) / 2)
         pts = np.reshape(pts, (n, 2))
         for i in range(n):
-            edge = (pts[(i+1) % n] - pts[i])#; edge /= np.linalg.norm(edge)
+            edge = (pts[(i+1) % n] - pts[i]); edge /= np.linalg.norm(edge)
             nor = np.array([edge[1], -edge[0]])
             r0 = pts[i]  # arbitrary choice among ith and (i+1)th point
             if valid_plane(pair, r0, nor):
@@ -529,14 +528,14 @@ def run():
         # Spawn 3 bodies heading towards each other, and sort them by bbox
         center = np.array([0, 0])
         radius = 300
-        n_bodies = 3
+        n_bodies = 2
         for i in range(n_bodies):
             # Create the rigid body
             theta = 2.0 * np.pi * float(i) / n_bodies
             xy0 = radius * np.array([np.cos(theta), np.sin(theta)])
-            v0 = normalize(center - xy0) * 30.0
+            v0 = normalize(center - xy0) * 200.0
             verts = regular_ngon_verts(3 + i)
-            body = RigidBody(verts, init_xy=xy0, init_v=v0, init_theta=np.pi*1.05, init_omega=np.pi/60, solver_id=2, id='tri' if i ==0 else 'square')
+            body = RigidBody(verts, init_xy=xy0, init_v=v0, init_theta=np.pi*1.05, init_omega=np.pi/4, solver_id=2)
             bodies.append(body)
             # Add its bbox endpoints to the lists (currently will be unsorted)
             x_sorted_endpoints.extend([Endpoint(i, body.get_endpoint_val(0), 0),
@@ -544,7 +543,8 @@ def run():
             y_sorted_endpoints.extend([Endpoint(i, body.get_endpoint_val(2), 2),
                                        Endpoint(i, body.get_endpoint_val(3), 3)])
 
-    while True:
+    bang = False
+    while not bang:
         w.delete('all')
         if len(bodies) > 0 and gravity:
             frame += 1
@@ -576,11 +576,12 @@ def run():
 
         elif mode == 2:
             # TODO: Handle collision detection + resolution here (i.e. before solving ODEs)
-            # TODO: 
-            #       0) Maintain sorted lists of bodies (1 for each dimension). Re-sort each time using insertion sort.
-            #       1) Sweep through the sorted lists to find all bbox collisions, and store them in a list of pairs
+            # TODO:
+            #       1) Take an ODE step.
+            #       2) Maintain sorted lists of bodies (1 for each dimension). Re-sort each time using insertion sort.
+            #       3) Sweep through the sorted lists to find all bbox collisions, and store them in a list of pairs
             #          i.e. (body1, body2).
-            #       2) Go through the list of pairs and either compute a new separating plane between the two shapes and
+            #       4) Go through the list of pairs and either compute a new separating plane between the two shapes and
             #          store it (in a way that they're associated with the pair), or check if the already stored one
             #          is still valid. If there IS NO SEPARATING PLANE (but bboxes intersect), then contact!
             #          Question: What kind of contact is it?
@@ -588,10 +589,10 @@ def run():
             #                       - Compute v_relative in direction of normal (normal • delta_v's)
             #                       - If v_rel < -eps  =>  colliding contact,  -eps < v_rel < eps  =>  resting,
             #                         v_rel > eps  =>  nothing to do. They're already moving apart.
-            #               2a) If colliding contact, then use bisection search to find exact time of collision (solve
+            #               4a) If colliding contact, then use bisection search to find exact time of collision (solve
             #                   ODE from last time-step forward in time through various amounts to conduct the search).
             #                   Then compute proper response (update velocities immediately, but not positions).
-            #               2b) If resting contact, there's a problem if there are external forces, because we might
+            #               4b) If resting contact, there's a problem if there are external forces, because we might
             #                   still need movement (i.e. the configuration might not be stable). So gravity, say,
             #                   is pulling us down——BUT——if all the contact points are treated as collisions, since
             #                   velocity is so small, the impulse will be so tiny / non-existent that the collision
@@ -600,7 +601,10 @@ def run():
             #                   to just exert the proper contact forces required to keep the object in place and not
             #                   penetrating. Then the vector sum of the forces (taking into account gravity) will be
             #                   tangential and create the necessary sliding motion.
-            #       3) Take an ODE step.
+
+            # 0) Take an ODE step.
+            for b in bodies:
+                b.solve(dt)
 
             # 1) Refresh the endpoints in the lists to reflect correct value (for resorting)
             for x_pt, y_pt in zip(x_sorted_endpoints, y_sorted_endpoints):
@@ -616,12 +620,28 @@ def run():
                     v = np.array([-nor[1], nor[0]]); v /= np.linalg.norm(v)
                     p1, p2 = r0 + (-200 * v), r0 + (+200 * v)
                     plane_points.append([*A(p1), *A(p2)])
+                else:
+                    bang = True
+                    r0, nor, idx = separating_planes[pair]  # previously encountered plane
+                    idx1, idx2 = tuple(pair)
+                    if idx1 != idx:  # we want the relative velocity to be computed as := (other_obj's vel) – (sep_plane_obj's vel)
+                        idx1, idx2 = idx2, idx1
+                    nor = bodies[idx].world_coords(nor, is_nor=True)
+                    v_rel = np.dot(nor, bodies[idx2].v - bodies[idx1].v)
+                    eps = 1E-10
+                    # Classify the contact type
+                    if v_rel < -eps:
+                        pass # COLLISION
+                    elif -eps < v_rel < eps:
+                        pass # RESTING
+                    else:
+                        pass # Nothing to do, separating
+
+
+
 
             # print('Number of planes:', len(plane_points))
             # print('Number cached:', len(separating_planes.keys()))
-
-            for b in bodies:
-                b.solve(dt)
 
         # Paint scene
         # Show labels
