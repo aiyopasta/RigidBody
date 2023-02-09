@@ -139,7 +139,7 @@ class RigidBody:
             pts.extend(A(p + self.xy))
         return pts
 
-    # NOT in screenspace! (i.e. NOT upon application of A())
+    # NOT in screenspace NOR worldspace! (i.e. NOT upon application of A())
     def get_endpoint_val(self, kind):
         '''
             kind: 0 = x-start, 1=x-end, 2=y-start, 3=y-end
@@ -182,7 +182,7 @@ class RigidBody:
                 self.solve_verlet(*params)
             elif self.solver_id == 3:
                 self.solve_sieuler_expanded(*params)  # naive will give equivalent results
-            else:
+            elif self.solver_id != -1:
                 self.solve_backward_euler(h)
 
     # BELOW LIE ALL THE IMPLICIT INTEGRATORS (THEY REQUIRE SOME FORM OF MATRIX INVERSION)!
@@ -546,12 +546,12 @@ def run():
         # Spawn 3 bodies heading towards each other, and sort them by bbox
         center = np.array([0, 0])
         radius = 200
-        n_bodies = 3
+        n_bodies = 4
         for i in range(n_bodies):
             # Create the rigid body
             theta = 2.0 * np.pi * float(i) / n_bodies
             xy0 = radius * np.array([np.cos(theta), np.sin(theta)])
-            v0 = (normalize(center - xy0) * 300.0) + np.array([0, 600 if gravity else 0])
+            v0 = (normalize(center - xy0) * 200.0) + np.array([0, 600 if gravity else 0])
             verts = regular_ngon_verts(3)
             body = RigidBody(verts, init_xy=xy0, init_v=v0, init_theta=0, init_omega=np.pi/5 * (i+1), solver_id=1)
             bodies.append(body)
@@ -560,6 +560,45 @@ def run():
                                        Endpoint(i, body.get_endpoint_val(0), 1)])
             y_sorted_endpoints.extend([Endpoint(i, body.get_endpoint_val(2), 2),
                                        Endpoint(i, body.get_endpoint_val(3), 3)])
+
+        # Add ground and walls to the list of bodies
+        # 1. Ground
+        eps = 40
+        ground_verts = [[-window_w/2, eps/2], [-window_w/2, -eps/2], [window_w/2, -eps/2], [window_w/2, eps/2]]
+        ground = RigidBody(np.array(ground_verts), init_xy=np.array([0, -window_h/2]), mass=1E20, inertia=1E20, solver_id=-1)
+        bodies.append(ground)
+        x_sorted_endpoints.extend([Endpoint(n_bodies, ground.get_endpoint_val(0), 0),
+                                   Endpoint(n_bodies, ground.get_endpoint_val(0), 1)])
+        y_sorted_endpoints.extend([Endpoint(n_bodies, ground.get_endpoint_val(2), 2),
+                                   Endpoint(n_bodies, ground.get_endpoint_val(3), 3)])
+
+        # # 2. Left wall
+        # left_verts = [[-window_w / 2, eps / 2], [-window_w / 2, -eps / 2], [window_w / 2, -eps / 2], [window_w / 2, eps / 2]]
+        # left_wall = RigidBody(np.array(left_verts), init_xy=np.array([-window_w/2, 0]), init_theta=np.pi/2, mass=1E20, inertia=1E20, solver_id=-1, id='left')
+        # bodies.append(left_wall)
+        # x_sorted_endpoints.extend([Endpoint(n_bodies+1, left_wall.get_endpoint_val(0), 0),
+        #                            Endpoint(n_bodies+1, left_wall.get_endpoint_val(0), 1)])
+        # y_sorted_endpoints.extend([Endpoint(n_bodies+1, left_wall.get_endpoint_val(2), 2),
+        #                            Endpoint(n_bodies+1, left_wall.get_endpoint_val(3), 3)])
+
+        # # 3. Right wall
+        # right_verts = [[-window_w / 2, eps / 2], [-window_w / 2, -eps / 2], [window_w / 2, -eps / 2], [window_w / 2, eps / 2]]
+        # right_wall = RigidBody(np.array(right_verts), init_xy=np.array([window_w/2, 0]), init_theta=np.pi/2, mass=1E20, inertia=1E20, solver_id=-1)
+        # bodies.append(right_wall)
+        # x_sorted_endpoints.extend([Endpoint(n_bodies + 2, right_wall.get_endpoint_val(0), 0),
+        #                            Endpoint(n_bodies + 2, right_wall.get_endpoint_val(0), 1)])
+        # y_sorted_endpoints.extend([Endpoint(n_bodies + 2, right_wall.get_endpoint_val(2), 2),
+        #                            Endpoint(n_bodies + 2, right_wall.get_endpoint_val(3), 3)])
+        #
+        # # 4. Ceiling
+        # ceil_verts = [[-window_w / 2, eps / 2], [-window_w / 2, -eps / 2], [window_w / 2, -eps / 2], [window_w / 2, eps / 2]]
+        # ceiling = RigidBody(np.array(ceil_verts), init_xy=np.array([0, window_h / 2]), mass=1E20, inertia=1E20, solver_id=-1)
+        # bodies.append(ceiling)
+        # x_sorted_endpoints.extend([Endpoint(n_bodies + 3, ceiling.get_endpoint_val(0), 0),
+        #                            Endpoint(n_bodies + 3, ceiling.get_endpoint_val(0), 1)])
+        # y_sorted_endpoints.extend([Endpoint(n_bodies + 3, ceiling.get_endpoint_val(2), 2),
+        #                            Endpoint(n_bodies + 3, ceiling.get_endpoint_val(3), 3)])
+
 
     bang = False
     while True:
@@ -671,23 +710,23 @@ def run():
                     eps = 1E-10
                     # 1. Collision Contact
                     if v_rel < -eps:
-                        if len(collision_points) == 1:
-                            # Impulse computation
-                            num = -(1 + restitution_coeff) * np.dot(vab_bar, nor)
-                            # # TODO: Actually compute the correct inertia scalar using Green's theorem.
-                            denom = ((1.0 / body_a.m) + (1.0 / body_b.m) + np.dot(nor, (np.cross(np.cross(ra, nor) / body_a.I, ra)) + (np.cross(np.cross(rb, nor) / body_b.I, rb))))
-                            j = num / denom
+                        # if len(collision_points) == 1:
+                            # print('Single Point')
+                        # Impulse computation
+                        num = -(1 + restitution_coeff) * np.dot(vab_bar, nor)
+                        # # TODO: Actually compute the correct inertia scalar using Green's theorem.
+                        denom = ((1.0 / body_a.m) + (1.0 / body_b.m) + np.dot(nor, (np.cross(np.cross(ra, nor) / body_a.I, ra)) + (np.cross(np.cross(rb, nor) / body_b.I, rb))))
+                        j = num / denom
 
-                            # Velocity / Angular Velocity Update
-                            body_a.omega += (np.cross(ra, j * nor) / body_a.I)[-1]
-                            body_b.omega -= (np.cross(rb, j * nor) / body_b.I)[-1]
-                            nor = nor[:-1]
-                            body_a.v += j * nor / body_a.m
-                            body_b.v -= j * nor / body_b.m
-                            print(j * nor / body_a.m)
+                        # Velocity / Angular Velocity Update
+                        body_a.omega += (np.cross(ra, j * nor) / body_a.I)[-1]
+                        body_b.omega -= (np.cross(rb, j * nor) / body_b.I)[-1]
+                        nor = nor[:-1]
+                        body_a.v += j * nor / body_a.m
+                        body_b.v -= j * nor / body_b.m
 
-                        else:
-                            print('Uh oh, multiple points. Not sure how to handle.')
+                        # else:
+                        #     print('Uh oh, multiple points. Not sure how to handle.')
 
                     # 2. Resting Contact
                     elif -eps < v_rel < eps:
@@ -756,16 +795,16 @@ def run():
             # Draw bodies
             for b in bodies:
                 w.create_polygon(*b.get_poly_points(), fill='blue', outline='white')
-                # w.create_rectangle(*b.get_bbox_points(), fill='', outline='white')
+                w.create_rectangle(*b.get_bbox_points(), fill='', outline='white')
 
-            # # Draw all separating planes
-            # for points in plane_points:
-            #     w.create_line(*points, fill='orange', width=3)
-            #
-            # # Draw all collision points
-            # radius = 10
-            # for pt in collision_points:
-            #     w.create_oval(*A(pt - radius), *A(pt + radius), fill='red')
+            # Draw all separating planes
+            for points in plane_points:
+                w.create_line(*points, fill='orange', width=3)
+
+            # Draw all collision points
+            radius = 10
+            for pt in collision_points:
+                w.create_oval(*A(pt - radius), *A(pt + radius), fill='red')
 
 
         # End run
