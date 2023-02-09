@@ -299,20 +299,20 @@ mode_text = ['EXPERIMENT #1: Constant Velocity / Acceleration Integration',
 
 mode_subtext = ['Constant Velocity: All will tie. Constant Acceleration: Semi-implicit gains extra energy and wins, while Euler strays behind the actual solution!',
                 '1) Red = Forward Euler, 2) Blue = RK2, 3) Green = Verlet (Velocity Version), 4) Purple = SI Euler, 5) Orange = Implicit Euler (Pixar\'s Notes)',
-                'idk lol']
+                'Objects constantly tunnel through each other, and even if we were to use bisection search to find exact c.p., not clear how large collision sims would stop tunneling.']
 
 instructions = ['Click anywhere to spawn 5 rigid bodies, one per integrator. \'G\' to toggle between space-mode and competition-mode.',
                 'Instructions: Sit back and watch.',
-                'idk lol']
+                'Overall: Impulse Based Local Method — Very Messy :(']
 
 # Universal parameters 🌎
 bodies = []
+gravity = True
 
 # Simulation params
 dt = 1. / 60.  # 60 fps
 
 # Mode 0 parameters / functions
-gravity = True
 frame = 0
 max_frame = 400
 
@@ -551,8 +551,8 @@ def run():
             # Create the rigid body
             theta = 2.0 * np.pi * float(i) / n_bodies
             xy0 = radius * np.array([np.cos(theta), np.sin(theta)])
-            v0 = normalize(center - xy0) * 100.0
-            verts = regular_ngon_verts(3 + i)
+            v0 = (normalize(center - xy0) * 300.0) + np.array([0, 600 if gravity else 0])
+            verts = regular_ngon_verts(3)
             body = RigidBody(verts, init_xy=xy0, init_v=v0, init_theta=0, init_omega=np.pi/5 * (i+1), solver_id=1)
             bodies.append(body)
             # Add its bbox endpoints to the lists (currently will be unsorted)
@@ -622,7 +622,7 @@ def run():
 
             # 0) Take an ODE step.
             for b in bodies:
-                b.solve(dt, experiment=mode)
+                b.solve(dt, const_a=np.array([0, -700 if gravity else 0]), experiment=mode)
 
             # 1) Refresh the endpoints in the lists to reflect correct value (for resorting)
             for x_pt, y_pt in zip(x_sorted_endpoints, y_sorted_endpoints):
@@ -653,27 +653,27 @@ def run():
                     r0 = bodies[idx].world_coords(r0)
                     collision_points.extend(valid_plane(pair, r0, nor, get_degenerates=True))
 
+                    # Drawing purposes... (separating plane)
                     v = np.array([-nor[1], nor[0]]); v /= np.linalg.norm(v)
                     p1, p2 = r0 + (-200 * v), r0 + (+200 * v)
                     plane_points.append([*A(p1), *A(p2)])
 
-                    v_rel = np.dot(nor, bodies[idx2].v - bodies[idx1].v)
                     # Classify the contact type
+                    body_a, body_b = bodies[idx1], bodies[idx2]
+                    pt = collision_points[0]
+                    ra, rb = pt - body_a.world_coords(body_a.centroid), pt - body_b.world_coords(body_b.centroid)
+                    ra, rb = np.array([*ra, 0]), np.array([*rb, 0])
+                    va_bar = body_a.v + np.cross(np.array([0., 0., body_a.omega]), ra)[:-1]
+                    vb_bar = body_b.v + np.cross(np.array([0., 0., body_b.omega]), rb)[:-1]
+                    vab_bar = np.array([*(va_bar - vb_bar), 0])
+                    nor = np.array([*nor, 0])
+                    v_rel = np.dot(nor, -vab_bar)
                     eps = 1E-10
                     # 1. Collision Contact
                     if v_rel < -eps:
                         if len(collision_points) == 1:
                             # Impulse computation
-                            body_a, body_b = bodies[idx1], bodies[idx2]
-                            pt = collision_points[0]
-                            nor = np.array([*nor, 0])
-                            va_bar = body_a.v + np.cross(np.array([0., 0., body_a.omega]), nor)[:-1]
-                            vb_bar = body_b.v + np.cross(np.array([0., 0., body_b.omega]), nor)[:-1]
-                            vab_bar = np.array([*(va_bar - vb_bar), 0])
                             num = -(1 + restitution_coeff) * np.dot(vab_bar, nor)
-
-                            ra, rb = pt - body_a.world_coords(body_a.centroid), pt - body_b.world_coords(body_b.centroid)
-                            ra, rb = np.array([*ra, 0]), np.array([*rb, 0])
                             # # TODO: Actually compute the correct inertia scalar using Green's theorem.
                             denom = ((1.0 / body_a.m) + (1.0 / body_b.m) + np.dot(nor, (np.cross(np.cross(ra, nor) / body_a.I, ra)) + (np.cross(np.cross(rb, nor) / body_b.I, rb))))
                             j = num / denom
@@ -756,16 +756,16 @@ def run():
             # Draw bodies
             for b in bodies:
                 w.create_polygon(*b.get_poly_points(), fill='blue', outline='white')
-                w.create_rectangle(*b.get_bbox_points(), fill='', outline='white')
+                # w.create_rectangle(*b.get_bbox_points(), fill='', outline='white')
 
-            # Draw all separating planes
-            for points in plane_points:
-                w.create_line(*points, fill='orange', width=3)
-
-            # Draw all collision points
-            radius = 10
-            for pt in collision_points:
-                w.create_oval(*A(pt - radius), *A(pt + radius), fill='red')
+            # # Draw all separating planes
+            # for points in plane_points:
+            #     w.create_line(*points, fill='orange', width=3)
+            #
+            # # Draw all collision points
+            # radius = 10
+            # for pt in collision_points:
+            #     w.create_oval(*A(pt - radius), *A(pt + radius), fill='red')
 
 
         # End run
