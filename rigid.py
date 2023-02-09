@@ -84,7 +84,7 @@ class RigidBody:
 
     # Compute the top-left and bottom-right of bbox
     # IN THE SHAPE'S REFERENCE FRAME! (In the usual space of (0, 0) being at the center of the screen).
-    def compute_bbox(self, fluff=40):
+    def compute_bbox(self, fluff=30):
         large = 1000000
         xy_high = np.array([-large, -large])
         xy_low = np.array([large, large])
@@ -94,13 +94,33 @@ class RigidBody:
 
         return np.array([xy_low[0] - fluff, xy_high[1] + fluff]), np.array([xy_high[0] + fluff, xy_low[1] - fluff])
 
+    def world_coords(self, local_vec, is_nor=False):
+        '''
+            Converts local shape space vector (e.g. a vertex location in shape space) into world.
+            (Still not in screen space though, i.e. NOT applying A() function.)
+
+            is_nor: Normals transform differently. If this is true, we apply that transformation.
+        '''
+        p = copy.copy(local_vec)
+        if not is_nor:
+            return np.dot(R(self.theta), p - self.centroid) + self.centroid + self.xy
+
+        return np.dot(R(self.theta), p)   # TODO: NOT TRUE IF IT'S NOT A REGULAR POLY AND HENCE CENTROID IS \NEQ 0
+
+    def shape_coords(self, world_vec, is_nor=False):
+        p = copy.copy(world_vec)
+        if not is_nor:
+            return np.dot(R(self.theta).T, p - self.xy - self.centroid) + self.centroid
+
+        return np.dot(R(self.theta).T, p)
+
     def get_poly_points(self, screen_space=True):
         # Assume x, theta have already been updated
         points = []
         for p in self.points:
             # Rotate about center of mass
-            xy = self.xy#Ainv(A(self.xy) % [window_w, window_h])
-            loc = np.dot(R(self.theta), p - self.centroid) + self.centroid + xy
+            #xy = Ainv(A(self.xy) % [window_w, window_h])
+            loc = self.world_coords(p)
             if screen_space:
                 points.extend(A(loc))
             else:
@@ -394,7 +414,9 @@ def get_collision_pairs():
     return list(x_pairs & y_pairs)
 
 # Dict from a 2-FROZENSET representing a collision pair, to a 2-tuple / 2-list representing the plane.
-# The plane is represented as (r0, w) where r0 and v are np.arrays representing the offset and normal, respectively.
+# The plane is represented as (r0, w, i) where r0 and v are np.arrays representing the offset and normal, respectively,
+# IN THE SHAPE'S LOCAL SPACE! Otherwise, it's no use! For every rotational / positional change we have to recompute,
+# and i is the index of the body whose local frame is the one we're using to describe r0 and w.
 # i.e. The test is then whether f(x) = w • (x - r0) is positive or negative.
 # NOTE: We'll NEVER remove pairs from this dict. It doesn't matter. If a pair is not a valid bbox collision, we just
 #       won't access it, and some dirty data will remain its value, which'll be cleaned automatically by checking
@@ -408,14 +430,19 @@ def valid_plane(pair: frozenset, r0: np.ndarray, nor: np.ndarray):
         2. We'll say a separating plane satisfies:
             — ALL the verts of one of the bodies must result in f(v) > 0  (strict positivity), AND
             — ALL the verts of the other must result in f(v) <= 0  (weak negativity).
+
+
+        NOTE: THE INPUT r0 AND nor HAVE TO BE IN WORLD SPACE!!
     '''
     global bodies
     b1, b2 = bodies[list(pair)[0]], bodies[list(pair)[1]]
+    eps = 1E-10
     raw_pts = b1.get_poly_points(screen_space=False)
     pts = np.reshape(raw_pts, (int(len(raw_pts) / 2), 2))
-    correct_side = np.dot(nor, pts[0] - r0) > 0
+    correct_side = np.dot(nor, pts[0] - r0) > eps
     for vert in pts:
-        same_side = correct_side == (np.dot(nor, vert - r0) > 0)
+        prod = np.dot(nor, vert - r0)
+        same_side = correct_side == (np.dot(nor, vert - r0) > eps)
         if not same_side:
             return False
 
@@ -424,7 +451,7 @@ def valid_plane(pair: frozenset, r0: np.ndarray, nor: np.ndarray):
     raw_pts = b2.get_poly_points(screen_space=False)
     pts = np.reshape(raw_pts, (int(len(raw_pts) / 2), 2))
     for vert in pts:
-        opp_side = correct_side != (np.dot(nor, vert - r0) > 0)
+        opp_side = correct_side != (np.dot(nor, vert - r0) > eps)
         if not opp_side:
             return False
 
@@ -443,25 +470,32 @@ def find_plane(pair: frozenset):
     '''
     global separating_planes, bodies
     if pair in separating_planes.keys():
-        val = separating_planes[pair]
-        if valid_plane(pair, *val):
-            return val
+        r0, nor, idx = separating_planes[pair]
+        r0 = bodies[idx].world_coords(r0)
+        nor = bodies[idx].world_coords(nor, is_nor=True)
+        if valid_plane(pair, r0, nor):  # bodies[idx].world_coords(nor, is_nor=True)
+            # print('Found cached!')
+            return r0, nor
 
     # Either it's a new pair we've never encountered, or old separating plane no longer valid.
+    # print('Finding new one...')
     lst_pair = list(pair)
     for k in range(2):
-        pts = bodies[lst_pair[k]].get_poly_points(screen_space=False)
+        body = bodies[lst_pair[k]]
+        pts = body.get_poly_points(screen_space=False)
         n = int(len(pts) / 2)
         pts = np.reshape(pts, (n, 2))
         for i in range(n):
-            edge = pts[(i+1) % n] - pts[i]
+            edge = (pts[(i+1) % n] - pts[i])#; edge /= np.linalg.norm(edge)
             nor = np.array([edge[1], -edge[0]])
             r0 = pts[i]  # arbitrary choice among ith and (i+1)th point
             if valid_plane(pair, r0, nor):
-                separating_planes[pair] = (r0, nor)  # command works regardless of whether pair already exists in dict
+                # Encode + store (Below command works regardless of whether pair already exists in dict)
+                separating_planes[pair] = (body.shape_coords(r0), body.shape_coords(nor, is_nor=True), lst_pair[k]) #(r0, nor, lst_pair[k])
                 return r0, nor
 
     # Fact that we're here means no separating plane (neither cached nor new) exists. There's been contact.
+    # print('Could not find one.')
     return None
 
 
@@ -494,15 +528,15 @@ def run():
     elif mode == 2:
         # Spawn 3 bodies heading towards each other, and sort them by bbox
         center = np.array([0, 0])
-        radius = 150
-        n_bodies = 2
+        radius = 300
+        n_bodies = 3
         for i in range(n_bodies):
             # Create the rigid body
             theta = 2.0 * np.pi * float(i) / n_bodies
             xy0 = radius * np.array([np.cos(theta), np.sin(theta)])
-            v0 = normalize(center - xy0) * 10.0
+            v0 = normalize(center - xy0) * 30.0
             verts = regular_ngon_verts(3 + i)
-            body = RigidBody(verts, init_xy=xy0, init_v=v0, solver_id=2)
+            body = RigidBody(verts, init_xy=xy0, init_v=v0, init_theta=np.pi*1.05, init_omega=np.pi/60, solver_id=2, id='tri' if i ==0 else 'square')
             bodies.append(body)
             # Add its bbox endpoints to the lists (currently will be unsorted)
             x_sorted_endpoints.extend([Endpoint(i, body.get_endpoint_val(0), 0),
@@ -580,11 +614,11 @@ def run():
                 if plane is not None:
                     r0, nor = plane
                     v = np.array([-nor[1], nor[0]]); v /= np.linalg.norm(v)
-                    p1, p2 = r0 + (-20 * v), r0 + (+200 * v)
+                    p1, p2 = r0 + (-200 * v), r0 + (+200 * v)
                     plane_points.append([*A(p1), *A(p2)])
 
-            print('Number of planes:', len(plane_points))
-            print('Number cached:', len(separating_planes.keys()))
+            # print('Number of planes:', len(plane_points))
+            # print('Number cached:', len(separating_planes.keys()))
 
             for b in bodies:
                 b.solve(dt)
