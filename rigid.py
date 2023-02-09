@@ -41,7 +41,8 @@ def R(theta: float):
 
 
 class RigidBody:
-    def __init__(self, points, init_xy=np.array([0.,0.]), init_v=np.array([0.,0.]), init_theta=0., init_omega=0., mass=1., inertia=500., solver_id=0, id='none'):
+    def __init__(self, points, init_xy=np.array([0.,0.]), init_v=np.array([0.,0.]), init_theta=0., init_omega=0.,
+                 mass=1., inertia=500., solver_id=0, id='none'):
         '''
             points: A python list of n numpy arrays of size 2 comprising the vertices of the body in cc order.
                     (IN BODY REFERENCE FRAME).
@@ -65,6 +66,8 @@ class RigidBody:
         self.n = 0  # number of times solved (useful for t0 ODE solver)
         self.solver_id = solver_id  # 0 = exact from tk, 1 = exact from t0, 2 = si-euler naive, 3 = si-euler expanded
 
+        self.bbox = self.compute_bbox()
+
     # Assume convex poly, split into triangles and take weighted avg of COM.
     # Fun fact: It's not at the mean of the positions of the vertices! Think about why this is by pondering the 1D case.
     # Note: COM is also in shape's reference frame!
@@ -78,6 +81,18 @@ class RigidBody:
             centroid += ((p0 + p1 + p2) / 3.) * area
 
         return centroid / total_area
+
+    # Compute the top-left and bottom-right of bbox
+    # IN THE SHAPE'S REFERENCE FRAME! (In the usual space of (0, 0) being at the center of the screen).
+    def compute_bbox(self, fluff=40):
+        large = 1000000
+        xy_high = np.array([-large, -large])
+        xy_low = np.array([large, large])
+        for p in self.points:
+            xy_high = np.maximum(xy_high, p)
+            xy_low = np.minimum(xy_low, p)
+
+        return np.array([xy_low[0] - fluff, xy_high[1] + fluff]), np.array([xy_high[0] + fluff, xy_low[1] - fluff])
 
     def get_poly_points(self, screen_space=True):
         # Assume x, theta have already been updated
@@ -98,6 +113,29 @@ class RigidBody:
         return [*A(self.centroid - radius + xy),
                 *A(self.centroid + radius + xy)]
 
+    def get_bbox_points(self):
+        pts = []
+        for p in self.bbox:
+            pts.extend(A(p + self.xy))
+        return pts
+
+    # NOT in screenspace! (i.e. NOT upon application of A())
+    def get_endpoint_val(self, kind):
+        '''
+            kind: 0 = x-start, 1=x-end, 2=y-start, 3=y-end
+        '''
+        topleft, botright = copy.copy(self.bbox[0]), copy.copy(self.bbox[1])
+        topleft += self.xy
+        botright += self.xy
+        if kind == 0:
+            return topleft[0]
+        elif kind == 1:
+            return botright[0]
+        elif kind == 2:
+            return botright[1]
+
+        return topleft[1]
+
     def KE(self):
         return 0.5 * np.dot(self.v, self.v) * self.m
 
@@ -115,7 +153,7 @@ class RigidBody:
             else:
                 self.solve_sieuler_expanded(*params)
 
-        elif experiment == 1:
+        elif experiment > 0:
             if self.solver_id == 0:
                 self.solve_forward_euler(*params)
             elif self.solver_id == 1:
@@ -213,6 +251,9 @@ class RigidBody:
         self.theta += (h * self.omega) + (0.5 * alpha_n * h_squared)
         self.omega += alpha_n * h  # constant angular acceleration means 0.5 * (alpha_{n+1} + alpha_n) = alpha_n.
 
+    def __repr__(self):
+        return str(self.ID)
+
 
 # Get regular n-gon vertices
 def regular_ngon_verts(n_sides, sidelen=50):
@@ -223,19 +264,26 @@ def regular_ngon_verts(n_sides, sidelen=50):
 
     return points
 
+# Normalize a vector
+def normalize(vec: np.ndarray):
+    return vec / np.linalg.norm(vec)
+
 
 # Switches / Knobs 🎚
-mode = 1   # 0 = Unconstrained rigid bodies (no forces)
+mode = 2   # 0 = Unconstrained rigid bodies (no forces), 1 = N-body comparison, 2 = Rigid body collision
 
 # Bells and whistles 🔔
 mode_text = ['EXPERIMENT #1: Constant Velocity / Acceleration Integration',
-             'EXPERIMENT #2: Non-constant Force Integration']
+             'EXPERIMENT #2: Non-constant Force Integration',
+             'EXPERIMENT #3: Rigid Body Collisions']
 
 mode_subtext = ['Constant Velocity: All will tie. Constant Acceleration: Semi-implicit gains extra energy and wins, while Euler strays behind the actual solution!',
-                '1) Red = Forward Euler, 2) Blue = RK2, 3) Green = Verlet (Velocity Version), 4) Purple = SI Euler, 5) Orange = Implicit Euler (Pixar\'s Notes)']
+                '1) Red = Forward Euler, 2) Blue = RK2, 3) Green = Verlet (Velocity Version), 4) Purple = SI Euler, 5) Orange = Implicit Euler (Pixar\'s Notes)',
+                'idk lol']
 
 instructions = ['Click anywhere to spawn 5 rigid bodies, one per integrator. \'G\' to toggle between space-mode and competition-mode.',
-                'Instructions: Sit back and watch.']
+                'Instructions: Sit back and watch.',
+                'idk lol']
 
 # Universal parameters 🌎
 bodies = []
@@ -283,9 +331,144 @@ def vectorfield_potential(xy: np.ndarray):
     return - const / r_mag if r_mag > epsilon else 0
 
 
+# Mode 2 Parameters
+class Endpoint:
+    kinds = ['X-Start', 'X-End', 'Y-Start', 'Y-End']
+
+    def __init__(self, body_idx, value, kind=0):
+        '''
+            Simple class which stores either the start or end of the bbox of an object for a certain dimension.
+            body_idx: Index of the body in question wrt the global 'bodies' array.
+            value: The actual value of the endpoint in question. NEEDS TO BE REFRESHED CONSTANTLY!
+            kind: 0 = x-start, 1=x-end, 2=y-start, 3=y-end (we only really need 2 types (don't care which dimension,
+                                                            but for debugging purposes))
+        '''
+        self.idx = body_idx
+        self.val = value
+        self.kind = kind
+
+    def refresh_val(self):
+        global bodies
+        self.val = bodies[self.idx].get_endpoint_val(kind=self.kind)
+
+    def __lt__(self, other):
+        return self.val < other.val
+
+    def __eq__(self, other):
+        return self.val == other.val
+
+    def __repr__(self):
+        return str(Endpoint.kinds[self.kind]) + ': ' + str(self.val)
+
+
+x_sorted_endpoints = []
+y_sorted_endpoints = []
+def get_collision_pairs():
+    global x_sorted_endpoints, y_sorted_endpoints
+    # Use sort & sweep algorithm
+    # 1. Sort (will be fast as it'll be already nearly sorted in general)
+    x_sorted_endpoints = sorted(x_sorted_endpoints)
+    y_sorted_endpoints = sorted(y_sorted_endpoints)
+    # 2. Sweep
+    x_pairs = set()
+    active_idxes = []
+    # In x-dimension first
+    for endpoint in x_sorted_endpoints:
+        if endpoint.kind == 0:
+            for idx in active_idxes:
+                x_pairs.add(frozenset({idx, endpoint.idx}))
+            active_idxes.append(endpoint.idx)
+        else:
+            active_idxes.remove(endpoint.idx)
+    # Now y-dimension
+    y_pairs = set()
+    active_idxes.clear()
+    for endpoint in y_sorted_endpoints:
+        if endpoint.kind == 2:
+            for idx in active_idxes:
+                y_pairs.add(frozenset({idx, endpoint.idx}))
+            active_idxes.append(endpoint.idx)
+        else:
+            active_idxes.remove(endpoint.idx)
+
+    return list(x_pairs & y_pairs)
+
+# Dict from a 2-FROZENSET representing a collision pair, to a 2-tuple / 2-list representing the plane.
+# The plane is represented as (r0, w) where r0 and v are np.arrays representing the offset and normal, respectively.
+# i.e. The test is then whether f(x) = w • (x - r0) is positive or negative.
+# NOTE: We'll NEVER remove pairs from this dict. It doesn't matter. If a pair is not a valid bbox collision, we just
+#       won't access it, and some dirty data will remain its value, which'll be cleaned automatically by checking
+#       if it's a valid plane if the pairs' bboxes happen to intersect again in the future.
+separating_planes = {}
+plane_points = []  # purely for visualization
+def valid_plane(pair: frozenset, r0: np.ndarray, nor: np.ndarray):
+    '''
+        Assumptions:
+        1. The shape of the body is convex.
+        2. We'll say a separating plane satisfies:
+            — ALL the verts of one of the bodies must result in f(v) > 0  (strict positivity), AND
+            — ALL the verts of the other must result in f(v) <= 0  (weak negativity).
+    '''
+    global bodies
+    b1, b2 = bodies[list(pair)[0]], bodies[list(pair)[1]]
+    raw_pts = b1.get_poly_points(screen_space=False)
+    pts = np.reshape(raw_pts, (int(len(raw_pts) / 2), 2))
+    correct_side = np.dot(nor, pts[0] - r0) > 0
+    for vert in pts:
+        same_side = correct_side == (np.dot(nor, vert - r0) > 0)
+        if not same_side:
+            return False
+
+    # Fact that we made it here means one of the shapes falls entirely on one side of the plane.
+    # Now we needa check the other one.
+    raw_pts = b2.get_poly_points(screen_space=False)
+    pts = np.reshape(raw_pts, (int(len(raw_pts) / 2), 2))
+    for vert in pts:
+        opp_side = correct_side != (np.dot(nor, vert - r0) > 0)
+        if not opp_side:
+            return False
+
+    return True
+
+
+def find_plane(pair: frozenset):
+    '''
+        Basically handle everything having to do with separating planes.
+        1) If the pair already has an associated plane, query it and check if still valid.
+            a) If valid, then return it.
+            b) Otherwise, proceed.
+        2) Search for a new separating plane (exhaustively).
+            a) If found: (i) Add it to the dictionary, and (ii) Return it.
+            b) If not found, there's been contact. So return None.
+    '''
+    global separating_planes, bodies
+    if pair in separating_planes.keys():
+        val = separating_planes[pair]
+        if valid_plane(pair, *val):
+            return val
+
+    # Either it's a new pair we've never encountered, or old separating plane no longer valid.
+    lst_pair = list(pair)
+    for k in range(2):
+        pts = bodies[lst_pair[k]].get_poly_points(screen_space=False)
+        n = int(len(pts) / 2)
+        pts = np.reshape(pts, (n, 2))
+        for i in range(n):
+            edge = pts[(i+1) % n] - pts[i]
+            nor = np.array([edge[1], -edge[0]])
+            r0 = pts[i]  # arbitrary choice among ith and (i+1)th point
+            if valid_plane(pair, r0, nor):
+                separating_planes[pair] = (r0, nor)  # command works regardless of whether pair already exists in dict
+                return r0, nor
+
+    # Fact that we're here means no separating plane (neither cached nor new) exists. There's been contact.
+    return None
+
+
 # Main function
 def run():
-    global dt, frame, max_frame, mode, bodies, gravity, mode_subtext, energies, initial_energies
+    global dt, frame, max_frame, mode, bodies, gravity, mode_subtext, energies, initial_energies, \
+           x_sorted_endpoints, y_sorted_endpoints, separating_planes, plane_points
     w.configure(background='black')
 
     # Prep
@@ -307,6 +490,25 @@ def run():
             energies.append(energy)
 
         initial_energies = copy.copy(energies)
+
+    elif mode == 2:
+        # Spawn 3 bodies heading towards each other, and sort them by bbox
+        center = np.array([0, 0])
+        radius = 150
+        n_bodies = 2
+        for i in range(n_bodies):
+            # Create the rigid body
+            theta = 2.0 * np.pi * float(i) / n_bodies
+            xy0 = radius * np.array([np.cos(theta), np.sin(theta)])
+            v0 = normalize(center - xy0) * 10.0
+            verts = regular_ngon_verts(3 + i)
+            body = RigidBody(verts, init_xy=xy0, init_v=v0, solver_id=2)
+            bodies.append(body)
+            # Add its bbox endpoints to the lists (currently will be unsorted)
+            x_sorted_endpoints.extend([Endpoint(i, body.get_endpoint_val(0), 0),
+                                       Endpoint(i, body.get_endpoint_val(0), 1)])
+            y_sorted_endpoints.extend([Endpoint(i, body.get_endpoint_val(2), 2),
+                                       Endpoint(i, body.get_endpoint_val(3), 3)])
 
     while True:
         w.delete('all')
@@ -337,6 +539,55 @@ def run():
                 body.solve(dt, const_a=accel, experiment=mode)
                 energy = vectorfield_potential(body.xy) + (body.KE() / body.m)
                 energies[i] = energy
+
+        elif mode == 2:
+            # TODO: Handle collision detection + resolution here (i.e. before solving ODEs)
+            # TODO: 
+            #       0) Maintain sorted lists of bodies (1 for each dimension). Re-sort each time using insertion sort.
+            #       1) Sweep through the sorted lists to find all bbox collisions, and store them in a list of pairs
+            #          i.e. (body1, body2).
+            #       2) Go through the list of pairs and either compute a new separating plane between the two shapes and
+            #          store it (in a way that they're associated with the pair), or check if the already stored one
+            #          is still valid. If there IS NO SEPARATING PLANE (but bboxes intersect), then contact!
+            #          Question: What kind of contact is it?
+            #                       - Compute contact normal (easy, just perpendicular to separating plane)
+            #                       - Compute v_relative in direction of normal (normal • delta_v's)
+            #                       - If v_rel < -eps  =>  colliding contact,  -eps < v_rel < eps  =>  resting,
+            #                         v_rel > eps  =>  nothing to do. They're already moving apart.
+            #               2a) If colliding contact, then use bisection search to find exact time of collision (solve
+            #                   ODE from last time-step forward in time through various amounts to conduct the search).
+            #                   Then compute proper response (update velocities immediately, but not positions).
+            #               2b) If resting contact, there's a problem if there are external forces, because we might
+            #                   still need movement (i.e. the configuration might not be stable). So gravity, say,
+            #                   is pulling us down——BUT——if all the contact points are treated as collisions, since
+            #                   velocity is so small, the impulse will be so tiny / non-existent that the collision
+            #                   point remains unresolved for the next time-step, and the next, and the next, and so on.
+            #                   So one way to really allow for the sliding motion which is what's really required is
+            #                   to just exert the proper contact forces required to keep the object in place and not
+            #                   penetrating. Then the vector sum of the forces (taking into account gravity) will be
+            #                   tangential and create the necessary sliding motion.
+            #       3) Take an ODE step.
+
+            # 1) Refresh the endpoints in the lists to reflect correct value (for resorting)
+            for x_pt, y_pt in zip(x_sorted_endpoints, y_sorted_endpoints):
+                x_pt.refresh_val()
+                y_pt.refresh_val()
+
+            # 2) Iterate through pairs and find separating plane, if it exists (either from cache or find new)
+            plane_points.clear()  # every iteration the points change (for drawing)
+            for pair in get_collision_pairs():
+                plane = find_plane(pair)
+                if plane is not None:
+                    r0, nor = plane
+                    v = np.array([-nor[1], nor[0]]); v /= np.linalg.norm(v)
+                    p1, p2 = r0 + (-20 * v), r0 + (+200 * v)
+                    plane_points.append([*A(p1), *A(p2)])
+
+            print('Number of planes:', len(plane_points))
+            print('Number cached:', len(separating_planes.keys()))
+
+            for b in bodies:
+                b.solve(dt)
 
         # Paint scene
         # Show labels
@@ -385,7 +636,16 @@ def run():
                 # Display lines for initial energies
                 energy = initial_energies[i]
                 w.create_line(*(topleft + np.array([0, energy * scaling])), *(topleft + np.array([width, energy * scaling])), fill=col)
+                
+        elif mode == 2:
+            # Draw bodies
+            for b in bodies:
+                w.create_polygon(*b.get_poly_points(), fill='blue', outline='white')
+                w.create_rectangle(*b.get_bbox_points(), fill='', outline='white')
 
+            # Draw all separating planes
+            for points in plane_points:
+                w.create_line(*points, fill='orange', width=3)
 
 
         # End run
