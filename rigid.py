@@ -130,8 +130,8 @@ class RigidBody:
 
     def get_centroid_points(self, radius=5):
         xy = self.xy #Ainv(A(self.xy) % [window_w, window_h])
-        return [*A(self.centroid - radius + xy),
-                *A(self.centroid + radius + xy)]
+        px, py = self.centroid - radius + xy, self.centroid + radius + xy
+        return [*A(px), *A(py)]
 
     def get_bbox_points(self):
         pts = []
@@ -352,6 +352,7 @@ def vectorfield_potential(xy: np.ndarray):
 
 
 # Mode 2 Parameters
+restitution_coeff = 1.0
 class Endpoint:
     kinds = ['X-Start', 'X-End', 'Y-Start', 'Y-End']
 
@@ -423,7 +424,8 @@ def get_collision_pairs():
 #       if it's a valid plane if the pairs' bboxes happen to intersect again in the future.
 separating_planes = {}
 plane_points = []  # purely for visualization
-def valid_plane(pair: frozenset, r0: np.ndarray, nor: np.ndarray):
+collision_points = []  # for viz
+def valid_plane(pair: frozenset, r0: np.ndarray, nor: np.ndarray, get_degenerates=False):
     '''
         Assumptions:
         1. The shape of the body is convex.
@@ -432,18 +434,26 @@ def valid_plane(pair: frozenset, r0: np.ndarray, nor: np.ndarray):
             — ALL the verts of the other must result in f(v) <= 0  (weak negativity).
 
 
+        get_degenerates: Boolean, if True then if there the plane is not valid, we get a list of vertices that
+                         fall on the "wrong side" of the plane, e.g. in a vertex-edge collision, this will be
+                         the single vertex constituting the collision point.
+
         NOTE: THE INPUT r0 AND nor HAVE TO BE IN WORLD SPACE!!
     '''
     global bodies
     b1, b2 = bodies[list(pair)[0]], bodies[list(pair)[1]]
     eps = 1E-10
+    degens = []
+
     raw_pts = b1.get_poly_points(screen_space=False)
     pts = np.reshape(raw_pts, (int(len(raw_pts) / 2), 2))
     correct_side = np.dot(nor, pts[0] - r0) > eps
     for vert in pts:
         same_side = correct_side == (np.dot(nor, vert - r0) > eps)
         if not same_side:
-            return False
+            degens.append(vert)
+            if not get_degenerates:
+                return False
 
     # Fact that we made it here means one of the shapes falls entirely on one side of the plane.
     # Now we needa check the other one.
@@ -452,9 +462,15 @@ def valid_plane(pair: frozenset, r0: np.ndarray, nor: np.ndarray):
     for vert in pts:
         opp_side = correct_side != (np.dot(nor, vert - r0) > eps)
         if not opp_side:
-            return False
+            degens.append(vert)
+            if not get_degenerates:
+                return False
 
-    return True
+    # Return stuff
+    if not get_degenerates:
+        return True
+    else:
+        return degens
 
 
 def find_plane(pair: frozenset):
@@ -489,6 +505,7 @@ def find_plane(pair: frozenset):
             nor = np.array([edge[1], -edge[0]])
             r0 = pts[i]  # arbitrary choice among ith and (i+1)th point
             if valid_plane(pair, r0, nor):
+                # print('Stored new one')
                 # Encode + store (Below command works regardless of whether pair already exists in dict)
                 separating_planes[pair] = (body.shape_coords(r0), body.shape_coords(nor, is_nor=True), lst_pair[k]) #(r0, nor, lst_pair[k])
                 return r0, nor
@@ -501,7 +518,8 @@ def find_plane(pair: frozenset):
 # Main function
 def run():
     global dt, frame, max_frame, mode, bodies, gravity, mode_subtext, energies, initial_energies, \
-           x_sorted_endpoints, y_sorted_endpoints, separating_planes, plane_points
+           x_sorted_endpoints, y_sorted_endpoints, separating_planes, plane_points, collision_points, \
+           restitution_coeff
     w.configure(background='black')
 
     # Prep
@@ -527,15 +545,15 @@ def run():
     elif mode == 2:
         # Spawn 3 bodies heading towards each other, and sort them by bbox
         center = np.array([0, 0])
-        radius = 300
-        n_bodies = 2
+        radius = 200
+        n_bodies = 3
         for i in range(n_bodies):
             # Create the rigid body
             theta = 2.0 * np.pi * float(i) / n_bodies
             xy0 = radius * np.array([np.cos(theta), np.sin(theta)])
-            v0 = normalize(center - xy0) * 200.0
+            v0 = normalize(center - xy0) * 100.0
             verts = regular_ngon_verts(3 + i)
-            body = RigidBody(verts, init_xy=xy0, init_v=v0, init_theta=np.pi*1.05, init_omega=np.pi/4, solver_id=2)
+            body = RigidBody(verts, init_xy=xy0, init_v=v0, init_theta=0, init_omega=np.pi/5 * (i+1), solver_id=1)
             bodies.append(body)
             # Add its bbox endpoints to the lists (currently will be unsorted)
             x_sorted_endpoints.extend([Endpoint(i, body.get_endpoint_val(0), 0),
@@ -544,7 +562,7 @@ def run():
                                        Endpoint(i, body.get_endpoint_val(3), 3)])
 
     bang = False
-    while not bang:
+    while True:
         w.delete('all')
         if len(bodies) > 0 and gravity:
             frame += 1
@@ -604,7 +622,7 @@ def run():
 
             # 0) Take an ODE step.
             for b in bodies:
-                b.solve(dt)
+                b.solve(dt, experiment=mode)
 
             # 1) Refresh the endpoints in the lists to reflect correct value (for resorting)
             for x_pt, y_pt in zip(x_sorted_endpoints, y_sorted_endpoints):
@@ -613,28 +631,71 @@ def run():
 
             # 2) Iterate through pairs and find separating plane, if it exists (either from cache or find new)
             plane_points.clear()  # every iteration the points change (for drawing)
+            collision_points.clear()
             for pair in get_collision_pairs():
                 plane = find_plane(pair)
+                # a) If there is a valid plane, sample it for drawing.
                 if plane is not None:
                     r0, nor = plane
                     v = np.array([-nor[1], nor[0]]); v /= np.linalg.norm(v)
                     p1, p2 = r0 + (-200 * v), r0 + (+200 * v)
                     plane_points.append([*A(p1), *A(p2)])
+                # b) Otherwise, we have contact and might need to handle it.
                 else:
                     bang = True
-                    r0, nor, idx = separating_planes[pair]  # previously encountered plane
+                    # Get the most recently encountered plane for this pair (there must have been one, and
+                    # it must be in the cache). And use it to compute the relative linear velocity wrt the normal.
+                    r0, nor, idx = separating_planes[pair]
                     idx1, idx2 = tuple(pair)
                     if idx1 != idx:  # we want the relative velocity to be computed as := (other_obj's vel) – (sep_plane_obj's vel)
                         idx1, idx2 = idx2, idx1
                     nor = bodies[idx].world_coords(nor, is_nor=True)
+                    r0 = bodies[idx].world_coords(r0)
+                    collision_points.extend(valid_plane(pair, r0, nor, get_degenerates=True))
+
+                    v = np.array([-nor[1], nor[0]]); v /= np.linalg.norm(v)
+                    p1, p2 = r0 + (-200 * v), r0 + (+200 * v)
+                    plane_points.append([*A(p1), *A(p2)])
+
                     v_rel = np.dot(nor, bodies[idx2].v - bodies[idx1].v)
-                    eps = 1E-10
                     # Classify the contact type
+                    eps = 1E-10
+                    # 1. Collision Contact
                     if v_rel < -eps:
-                        pass # COLLISION
+                        if len(collision_points) == 1:
+                            # Impulse computation
+                            body_a, body_b = bodies[idx1], bodies[idx2]
+                            pt = collision_points[0]
+                            nor = np.array([*nor, 0])
+                            va_bar = body_a.v + np.cross(np.array([0., 0., body_a.omega]), nor)[:-1]
+                            vb_bar = body_b.v + np.cross(np.array([0., 0., body_b.omega]), nor)[:-1]
+                            vab_bar = np.array([*(va_bar - vb_bar), 0])
+                            num = -(1 + restitution_coeff) * np.dot(vab_bar, nor)
+
+                            ra, rb = pt - body_a.world_coords(body_a.centroid), pt - body_b.world_coords(body_b.centroid)
+                            ra, rb = np.array([*ra, 0]), np.array([*rb, 0])
+                            # # TODO: Actually compute the correct inertia scalar using Green's theorem.
+                            denom = ((1.0 / body_a.m) + (1.0 / body_b.m) + np.dot(nor, (np.cross(np.cross(ra, nor) / body_a.I, ra)) + (np.cross(np.cross(rb, nor) / body_b.I, rb))))
+                            j = num / denom
+
+                            # Velocity / Angular Velocity Update
+                            body_a.omega += (np.cross(ra, j * nor) / body_a.I)[-1]
+                            body_b.omega -= (np.cross(rb, j * nor) / body_b.I)[-1]
+                            nor = nor[:-1]
+                            body_a.v += j * nor / body_a.m
+                            body_b.v -= j * nor / body_b.m
+                            print(j * nor / body_a.m)
+
+                        else:
+                            print('Uh oh, multiple points. Not sure how to handle.')
+
+                    # 2. Resting Contact
                     elif -eps < v_rel < eps:
                         pass # RESTING
+
+                    # 3. Separating Contact
                     else:
+                        print('Separating')
                         pass # Nothing to do, separating
 
 
@@ -700,6 +761,11 @@ def run():
             # Draw all separating planes
             for points in plane_points:
                 w.create_line(*points, fill='orange', width=3)
+
+            # Draw all collision points
+            radius = 10
+            for pt in collision_points:
+                w.create_oval(*A(pt - radius), *A(pt + radius), fill='red')
 
 
         # End run
