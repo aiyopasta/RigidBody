@@ -11,6 +11,10 @@
 #     spot below), the ODE solver automatically adds velocity to objects (gravity) turning even those contact points
 #     into colliding contact ones. And then the restitution coefficient damps the response, so the shapes "resting"
 #     aren't truly resting, they're just doing really tiny bounces up and down.
+#  3. I haven't implemented bisection search! That's why sometimes it looks like collisions are "digging into" each
+#     other.
+#  4. I also haven't used the proper Green's theorem technique to compute the moments of inertia here. But I know how.
+#     Also since we're in 2D, we don't have to use the RIR^T thing to convert I from body frame to world frame.
 
 from tkinter import *
 import numpy as np
@@ -370,7 +374,7 @@ def vectorfield_potential(xy: np.ndarray):
 
 
 # Mode 2 Parameters
-restitution_coeff = 1.0
+restitution_coeff = 0.95
 
 
 class Endpoint:
@@ -525,38 +529,6 @@ def valid_plane(pair: frozenset, r0: np.ndarray, nor: np.ndarray, get_degenerate
         return degens if get_degenerates else True
 
 
-
-    # degens = []
-    #
-    # # Check if one of the bodies falls entirely on one side of the plane.
-    # raw_pts = b1.get_poly_points(screen_space=False)
-    # pts = np.reshape(raw_pts, (int(len(raw_pts) / 2), 2))
-    # correct_side = np.dot(nor, pts[0] - r0) > eps
-    # for vert in pts:
-    #     same_side = correct_side == (np.dot(nor, vert - r0) > eps)
-    #     if not same_side:
-    #         degens.append(vert)
-    #         if not get_degenerates:
-    #             return False
-    #
-    # # Fact that we made it here means one of the shapes falls entirely on one side of the plane.
-    # # Now we needa check the other one.
-    # raw_pts = b2.get_poly_points(screen_space=False)
-    # pts = np.reshape(raw_pts, (int(len(raw_pts) / 2), 2))
-    # for vert in pts:
-    #     opp_side = correct_side != (np.dot(nor, vert - r0) > eps)
-    #     if not opp_side:
-    #         degens.append(vert)
-    #         if not get_degenerates:
-    #             return False
-    #
-    # # Return stuff
-    # if not get_degenerates:
-    #     return True
-    # else:
-    #     return degens
-
-
 def find_plane(pair: frozenset):
     '''
         Basically handle everything having to do with separating planes.
@@ -632,13 +604,13 @@ def run():
         # Spawn 3 bodies heading towards each other, and sort them by bbox
         center = np.array([0, 0])
         radius = 300
-        n_bodies = 15
+        n_bodies = 7
         for i in range(n_bodies):
             # Create the rigid body
             theta = 2.0 * np.pi * float(i) / n_bodies
             xy0 = radius * np.array([np.cos(theta), np.sin(theta)])
             v0 = (normalize(center - xy0) * 200.0) + np.array([0, 600 if gravity else 0])
-            verts = regular_ngon_verts(4, sidelen=60)
+            verts = regular_ngon_verts(4, sidelen=100)
             body = RigidBody(verts, init_xy=xy0, init_v=v0, init_theta=0, init_omega=np.pi / 5 * (i + 1), solver_id=1)
             bodies.append(body)
             # Add its bbox endpoints to the lists (currently will be unsorted)
@@ -719,32 +691,31 @@ def run():
                 energies[i] = energy
 
         elif mode == 2:
-            # TODO: Handle collision detection + resolution here (i.e. before solving ODEs)
-            # TODO:
-            #       1) Take an ODE step.
-            #       2) Maintain sorted lists of bodies (1 for each dimension). Re-sort each time using insertion sort.
-            #       3) Sweep through the sorted lists to find all bbox collisions, and store them in a list of pairs
-            #          i.e. (body1, body2).
-            #       4) Go through the list of pairs and either compute a new separating plane between the two shapes and
-            #          store it (in a way that they're associated with the pair), or check if the already stored one
-            #          is still valid. If there IS NO SEPARATING PLANE (but bboxes intersect), then contact!
-            #          Question: What kind of contact is it?
-            #                       - Compute contact normal (easy, just perpendicular to separating plane)
-            #                       - Compute v_relative in direction of normal (normal • delta_v's)
-            #                       - If v_rel < -eps  =>  colliding contact,  -eps < v_rel < eps  =>  resting,
-            #                         v_rel > eps  =>  nothing to do. They're already moving apart.
-            #               4a) If colliding contact, then use bisection search to find exact time of collision (solve
-            #                   ODE from last time-step forward in time through various amounts to conduct the search).
-            #                   Then compute proper response (update velocities immediately, but not positions).
-            #               4b) If resting contact, there's a problem if there are external forces, because we might
-            #                   still need movement (i.e. the configuration might not be stable). So gravity, say,
-            #                   is pulling us down——BUT——if all the contact points are treated as collisions, since
-            #                   velocity is so small, the impulse will be so tiny / non-existent that the collision
-            #                   point remains unresolved for the next time-step, and the next, and the next, and so on.
-            #                   So one way to really allow for the sliding motion which is what's really required is
-            #                   to just exert the proper contact forces required to keep the object in place and not
-            #                   penetrating. Then the vector sum of the forces (taking into account gravity) will be
-            #                   tangential and create the necessary sliding motion.
+            #  Algorithm overview:
+            # 1) Take an ODE step.
+            # 2) Maintain sorted lists of bodies (1 for each dimension). Re-sort each time using insertion sort.
+            # 3) Sweep through the sorted lists to find all bbox collisions, and store them in a list of pairs
+            #    i.e. (body1, body2).
+            # 4) Go through the list of pairs and either compute a new separating plane between the two shapes and
+            #    store it (in a way that they're associated with the pair), or check if the already stored one
+            #    is still valid. If there IS NO SEPARATING PLANE (but bboxes intersect), then contact!
+            #    Question: What kind of contact is it?
+            #                 - Compute contact normal (easy, just perpendicular to separating plane)
+            #                 - Compute v_relative in direction of normal (normal • delta_v's)
+            #                 - If v_rel < -eps  =>  colliding contact,  -eps < v_rel < eps  =>  resting,
+            #                   v_rel > eps  =>  nothing to do. They're already moving apart.
+            #         4a) If colliding contact, then use bisection search to find exact time of collision (solve
+            #             ODE from last time-step forward in time through various amounts to conduct the search).
+            #             Then compute proper response (update velocities immediately, but not positions).
+            #         4b) If resting contact, there's a problem if there are external forces, because we might
+            #             still need movement (i.e. the configuration might not be stable). So gravity, say,
+            #             is pulling us down——BUT——if all the contact points are treated as collisions, since
+            #             velocity is so small, the impulse will be so tiny / non-existent that the collision
+            #             point remains unresolved for the next time-step, and the next, and the next, and so on.
+            #             So one way to really allow for the sliding motion which is what's really required is
+            #             to just exert the proper contact forces required to keep the object in place and not
+            #             penetrating. Then the vector sum of the forces (taking into account gravity) will be
+            #             tangential and create the necessary sliding motion.
 
             # 0) Take an ODE step.
             for b in bodies:
