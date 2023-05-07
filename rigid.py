@@ -1,6 +1,16 @@
 # Aditya Abhyankar 2023
-# TODO (NEXT): 1) Add semi-implicit Euler (prediction: it'll just accelerate at twice the speed... but it'll be cool to see just how wrong I always was), 2) Show comparison of KE+PE conservation, 3) Text bells and whistles
-#       AFTER: 1) Spring forces applied to arbitrary points on body (clickable), then 2) 2-body problem (Forward euler vs. Verlet vs. Backwards Euler vs. Semi-implicit euler)
+# COLLISION OBSERVATIONS
+#  1. Local method = very bad, because no simultaneous consideration of contact points. Each just exerts
+#                    an impulse without considering others. This creates problems when dealing with things
+#                    like resting contact, because that's when objects pile up on top of one another and
+#                    push each other carelessly into one another. More modern / sophisticated method use
+#                    an optimization or direct linear (or if you're a monster, then quadratic) solver.
+#  2. Related to the first one — Try changing the restitution coefficient below 1. At around 0.9ish we get a reasonable
+#     resting contact sim, but it's clear how fragile it is, i.e. objects start to tunnel eachother / really do not
+#     want to remain in the resting spot. The thing is, even if we haven't implemented resting contact (see blank
+#     spot below), the ODE solver automatically adds velocity to objects (gravity) turning even those contact points
+#     into colliding contact ones. And then the restitution coefficient damps the response, so the shapes "resting"
+#     aren't truly resting, they're just doing really tiny bounces up and down.
 
 from tkinter import *
 import numpy as np
@@ -305,12 +315,12 @@ mode_text = ['EXPERIMENT #1: Constant Velocity / Acceleration Integration',
 mode_subtext = [
     'Constant Velocity: All will tie. Constant Acceleration: Semi-implicit gains extra energy and wins, while Euler strays behind the actual solution!',
     '1) Red = Forward Euler, 2) Blue = RK2, 3) Green = Verlet (Velocity Version), 4) Purple = SI Euler, 5) Orange = Implicit Euler (Pixar\'s Notes)',
-    'Objects constantly tunnel through each other, and even if we were to use bisection search to find exact c.p., not clear how large collision sims would stop tunneling.']
+    'If you reduce the coefficient of restitution (enable rest state), we start to see tunneling as we get more of objects pushing into others without care for other simultaneous collisions.']
 
 instructions = [
     'Click anywhere to spawn 5 rigid bodies, one per integrator. \'G\' to toggle between space-mode and competition-mode.',
     'Instructions: Sit back and watch.',
-    'Overall: Impulse Based Local Method — Very Messy :(']
+    'Impulse Based Local Method — Bad, but acceptable!']
 
 # Universal parameters 🌎
 bodies = []
@@ -621,14 +631,14 @@ def run():
     elif mode == 2:
         # Spawn 3 bodies heading towards each other, and sort them by bbox
         center = np.array([0, 0])
-        radius = 200
-        n_bodies = 11
+        radius = 300
+        n_bodies = 15
         for i in range(n_bodies):
             # Create the rigid body
             theta = 2.0 * np.pi * float(i) / n_bodies
             xy0 = radius * np.array([np.cos(theta), np.sin(theta)])
             v0 = (normalize(center - xy0) * 200.0) + np.array([0, 600 if gravity else 0])
-            verts = regular_ngon_verts(4)
+            verts = regular_ngon_verts(4, sidelen=60)
             body = RigidBody(verts, init_xy=xy0, init_v=v0, init_theta=0, init_omega=np.pi / 5 * (i + 1), solver_id=1)
             bodies.append(body)
             # Add its bbox endpoints to the lists (currently will be unsorted)
@@ -882,7 +892,7 @@ def run():
             # Draw bodies
             for b in bodies:
                 w.create_polygon(*b.get_poly_points(), fill='blue', outline='white')
-                w.create_rectangle(*b.get_bbox_points(), fill='', outline='white')
+                # w.create_rectangle(*b.get_bbox_points(), fill='', outline='white')
 
             # # Draw all separating planes
             # for points in plane_points:
