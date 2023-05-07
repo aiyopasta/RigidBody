@@ -374,7 +374,8 @@ def vectorfield_potential(xy: np.ndarray):
 
 
 # Mode 2 Parameters
-restitution_coeff = 0.95
+restitution_coeff = 1.0
+grav_const = -1000.0
 
 
 class Endpoint:
@@ -577,7 +578,7 @@ def find_plane(pair: frozenset):
 def run():
     global dt, frame, max_frame, mode, bodies, gravity, mode_subtext, energies, initial_energies, \
         x_sorted_endpoints, y_sorted_endpoints, separating_planes, plane_points, collision_points, \
-        restitution_coeff
+        restitution_coeff, grav_const
     w.configure(background='black')
 
     # Prep
@@ -603,14 +604,14 @@ def run():
     elif mode == 2:
         # Spawn 3 bodies heading towards each other, and sort them by bbox
         center = np.array([0, 0])
-        radius = 300
-        n_bodies = 7
+        radius = 400
+        n_bodies = 20
         for i in range(n_bodies):
             # Create the rigid body
             theta = 2.0 * np.pi * float(i) / n_bodies
             xy0 = radius * np.array([np.cos(theta), np.sin(theta)])
             v0 = (normalize(center - xy0) * 200.0) + np.array([0, 600 if gravity else 0])
-            verts = regular_ngon_verts(4, sidelen=100)
+            verts = regular_ngon_verts(np.random.randint(3, 6+1), sidelen=60)
             body = RigidBody(verts, init_xy=xy0, init_v=v0, init_theta=0, init_omega=np.pi / 5 * (i + 1), solver_id=1)
             bodies.append(body)
             # Add its bbox endpoints to the lists (currently will be unsorted)
@@ -719,7 +720,7 @@ def run():
 
             # 0) Take an ODE step.
             for b in bodies:
-                b.solve(dt, const_a=np.array([0, -700 if gravity else 0]), experiment=mode)
+                b.solve(dt, const_a=np.array([0, grav_const if gravity else 0]), experiment=mode)
 
             # 1) Refresh the endpoints in the lists to reflect correct value (for resorting)
             for x_pt, y_pt in zip(x_sorted_endpoints, y_sorted_endpoints):
@@ -774,7 +775,7 @@ def run():
                         v_rel = np.dot(nor, -vab_bar)
                         eps = 1E-10
                         # 1. Collision Contact
-                        if v_rel < -eps:
+                        if v_rel < -eps:  # Note: Even if you allow the solve to occur if the RESTING CONTACT condition is satisfied, it does not work as it's a local method. Try it!
                             # if len(collision_points) == 1:
                             # print('Single Point')
                             # Impulse computation
@@ -799,7 +800,6 @@ def run():
 
                         # 3. Separating Contact
                         else:
-                            print('Separating')
                             pass  # Nothing to do, separating
 
             # print('Number of planes:', len(plane_points))
@@ -860,9 +860,14 @@ def run():
                               *(topleft + np.array([width, energy * scaling])), fill=col)
 
         elif mode == 2:
+            # Draw coeffs text
+            w.create_text(window_w/2, window_h/2 - 100, text="Restitution: "+str(restitution_coeff), font=("Avenir Next", 50), fill='white')
+            w.create_text(window_w / 2, window_h / 2, text="Gravity: " + str(grav_const), font=("Avenir Next", 50), fill='white')
+
+            cols = ['red', 'purple', 'orange', 'yellow', 'green', 'blue', 'cyan']
             # Draw bodies
             for b in bodies:
-                w.create_polygon(*b.get_poly_points(), fill='blue', outline='white')
+                w.create_polygon(*b.get_poly_points(), fill=cols[(len(b.get_poly_points()) - 3) % len(cols)], outline='white')
                 # w.create_rectangle(*b.get_bbox_points(), fill='', outline='white')
 
             # # Draw all separating planes
