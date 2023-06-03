@@ -73,8 +73,9 @@ class RigidBody:
         self.points = [np.array([p[0], p[1]]) for p in points]
         self.centroid = self.compute_centroid()
         self.xy, self.v, self.theta, self.omega = init_xy, init_v, init_theta, init_omega
-        self.xy_0, self.v_0, self.theta_0, self.omega_0 = copy.copy(self.xy), copy.copy(self.v), copy.copy(
-            self.theta), copy.copy(self.omega)
+        self.xy_0, self.v_0, self.theta_0, self.omega_0 = copy.copy(self.xy), copy.copy(self.v), copy.copy(self.theta), copy.copy(self.omega)
+        self.old_xy = np.array([0., 0.])
+        self.old_theta = 0.
         self.m = mass
         self.I = inertia
         self.ID = id
@@ -110,7 +111,6 @@ class RigidBody:
 
         length_, height_ = xy_high[0] - xy_low[0], xy_high[1] - xy_low[1]
         side_ = max(length_, height_)
-        print(side_)
         return np.array([-side_/2 - fluff, side_/2 + fluff]), np.array([side_/2 + fluff, -side_/2 - fluff]) #np.array([xy_low[0] - fluff, xy_high[1] + fluff]), np.array([xy_high[0] + fluff, xy_low[1] - fluff])
 
     def world_coords(self, local_vec, is_nor=False):
@@ -178,7 +178,16 @@ class RigidBody:
     def KE(self):
         return 0.5 * np.dot(self.v, self.v) * self.m
 
+    # Just for collisions
+    def solve_based_on_old(self, h):
+        if self.solver_id != -1:
+            self.xy = self.old_xy + (h * self.v)
+            self.theta = self.old_theta + (h * self.omega)
+
+    # Main solve method for other modes
     def solve(self, h, const_a=np.array([0, 0]), const_alpha=0., experiment=0):
+        self.old_xy = copy.copy(self.xy)
+        self.old_theta = copy.copy(self.theta)
         params = [h, const_a, const_alpha]
         if experiment == 0:
             if self.solver_id == 0:
@@ -261,7 +270,7 @@ class RigidBody:
         self.v = self.v_0 + (elapsed_t * const_a)
         self.omega = self.omega_0 + (elapsed_t * const_alpha)
 
-    # 4) The naive, inexact update everyone (including me) usually does when acceleration is constant.
+    # 4) The naive, inexact update everyone (including me) usually does, even when acceleration is constant.
     #    S.I. = "semi-implicit Euler"
     def solve_sieuler_naive(self, h, const_a=np.array([0, 0]), const_alpha=0.):
         self.v += h * const_a
@@ -374,7 +383,7 @@ def vectorfield_potential(xy: np.ndarray):
 
 
 # Mode 2 Parameters
-restitution_coeff = 1.0
+restitution_coeff = 0.6
 grav_const = -1000.0
 
 
@@ -443,7 +452,7 @@ def get_collision_pairs():
 
 
 # Dict from a 2-FROZENSET representing a collision pair, to a 2-tuple / 2-list representing the plane.
-# The plane is represented as (r0, w, i) where r0 and v are np.arrays representing the offset and normal, respectively,
+# The plane is represented as (r0, w, i) where r0 and w are np.arrays representing the offset and normal, respectively,
 # IN THE SHAPE'S LOCAL SPACE! Otherwise, it's no use! For every rotational / positional change we have to recompute,
 # and i is the index of the body whose local frame is the one we're using to describe r0 and w.
 # i.e. The test is then whether f(x) = w • (x - r0) is positive or negative.
@@ -558,15 +567,14 @@ def find_plane(pair: frozenset):
         n = int(len(pts) / 2)
         pts = np.reshape(pts, (n, 2))
         for i in range(n):
-            edge = (pts[(i + 1) % n] - pts[i]);
+            edge = (pts[(i + 1) % n] - pts[i])
             edge /= np.linalg.norm(edge)
             nor = np.array([edge[1], -edge[0]])
             r0 = pts[i]  # arbitrary choice among ith and (i+1)th point
             if valid_plane(pair, r0, nor):
                 # print('Stored new one')
                 # Encode + store (Below command works regardless of whether pair already exists in dict)
-                separating_planes[pair] = (
-                body.shape_coords(r0), body.shape_coords(nor, is_nor=True), lst_pair[k])  # (r0, nor, lst_pair[k])
+                separating_planes[pair] = (body.shape_coords(r0), body.shape_coords(nor, is_nor=True), lst_pair[k])  # (r0, nor, lst_pair[k])
                 return r0, nor
 
     # Fact that we're here means no separating plane (neither cached nor new) exists. There's been contact.
@@ -611,8 +619,8 @@ def run():
             theta = 2.0 * np.pi * float(i) / n_bodies
             xy0 = radius * np.array([np.cos(theta), np.sin(theta)])
             v0 = (normalize(center - xy0) * 200.0) + np.array([0, 600 if gravity else 0])
-            verts = regular_ngon_verts(np.random.randint(3, 6+1), sidelen=60)
-            body = RigidBody(verts, init_xy=xy0, init_v=v0, init_theta=0, init_omega=np.pi / 5 * (i + 1), solver_id=1)
+            verts = regular_ngon_verts(4, sidelen=60)  #np.random.randint(3, 6+1)
+            body = RigidBody(verts, init_xy=xy0, init_v=v0, init_theta=np.pi / 6, init_omega=1.0, solver_id=1)  # init_omega=np.pi / 5 * (i + 1)
             bodies.append(body)
             # Add its bbox endpoints to the lists (currently will be unsorted)
             x_sorted_endpoints.extend([Endpoint(i, body.get_endpoint_val(0), 0),
@@ -694,7 +702,7 @@ def run():
         elif mode == 2:
             #  Algorithm overview:
             # 1) Take an ODE step.
-            # 2) Maintain sorted lists of bodies (1 for each dimension). Re-sort each time using insertion sort.
+            # 2) Maintain sorted lists of bodies (1 for each dimension). Re-sort each time using insertion sort.  TODO: CMU suggests NOT using insertion sort each time, simply the FIRST time, and then just doing tiny exchanges for following time-steps.
             # 3) Sweep through the sorted lists to find all bbox collisions, and store them in a list of pairs
             #    i.e. (body1, body2).
             # 4) Go through the list of pairs and either compute a new separating plane between the two shapes and
@@ -718,7 +726,8 @@ def run():
             #             penetrating. Then the vector sum of the forces (taking into account gravity) will be
             #             tangential and create the necessary sliding motion.
 
-            # 0) Take an ODE step.
+            start_time = time.time()
+            # 0) Take the first ODE step (only integrating accelerations).
             for b in bodies:
                 b.solve(dt, const_a=np.array([0, grav_const if gravity else 0]), experiment=mode)
 
@@ -728,8 +737,7 @@ def run():
                 y_pt.refresh_val()
 
             # 2) Iterate through pairs and find separating plane, if it exists (either from cache or find new)
-            plane_points.clear()  # every iteration the points change (for drawing)
-            collision_points.clear()
+            legit_contacts = []
             for pair in get_collision_pairs():
                 plane = find_plane(pair)
                 # a) If there is a valid plane, sample it for drawing.
@@ -745,6 +753,15 @@ def run():
                     if pair.issubset(np.arange(len(bodies) - 4, len(bodies))):
                         continue
 
+                    legit_contacts.append(pair)
+
+            # Iterative collective collision resolution
+            all_separating = False
+            while not all_separating:
+                all_separating = True
+                plane_points.clear()  # every iteration the points change (for drawing)
+                for pair in legit_contacts:
+                    collision_points.clear()
                     # Get the most recently encountered plane for this pair (there must have been one, and
                     # it must be in the cache). And use it to compute the relative linear velocity wrt the normal.
                     r0, nor, idx = separating_planes[pair]
@@ -753,7 +770,7 @@ def run():
                         idx1, idx2 = idx2, idx1
                     nor = bodies[idx].world_coords(nor, is_nor=True)
                     r0 = bodies[idx].world_coords(r0)
-                    collision_points.extend(valid_plane(pair, r0, nor, get_degenerates=True))
+                    collision_points.extend(valid_plane(pair, r0, nor, get_degenerates=True))  # get ALL contact points for this collision pair
                     nor = np.array([*nor, 0])
 
                     # Drawing purposes... (separating plane)
@@ -762,8 +779,10 @@ def run():
                     p1, p2 = r0 + (-200 * v), r0 + (+200 * v)
                     plane_points.append([*A(p1), *A(p2)])
 
-                    # Resolve each collision one by one (locally)!
-                    for pt in collision_points:
+                    # Resolve all the collisions for this collision pair.
+                    for k, pt in enumerate(collision_points):
+                        print('Considering point', k)
+                        # print(np.dot(nor[:-1], pt - r0) / np.linalg.norm(nor))
                         # Classify the contact type
                         body_a, body_b = bodies[idx1], bodies[idx2]
                         # pt = collision_points[0]
@@ -775,14 +794,11 @@ def run():
                         v_rel = np.dot(nor, -vab_bar)
                         eps = 1E-10
                         # 1. Collision Contact
-                        if v_rel < -eps:  # Note: Even if you allow the solve to occur if the RESTING CONTACT condition is satisfied, it does not work as it's a local method. Try it!
-                            # if len(collision_points) == 1:
-                            # print('Single Point')
+                        if v_rel < -eps:
                             # Impulse computation
                             num = -(1 + restitution_coeff) * np.dot(vab_bar, nor)
-                            # # TODO: Actually compute the correct inertia scalar using Green's theorem.
-                            denom = ((1.0 / body_a.m) + (1.0 / body_b.m) + np.dot(nor, (
-                                np.cross(np.cross(ra, nor) / body_a.I, ra)) + (np.cross(np.cross(rb, nor) / body_b.I, rb))))
+                            # TODO: Actually compute the correct inertia scalar using Green's theorem.
+                            denom = ((1.0 / body_a.m) + (1.0 / body_b.m) + np.dot(nor, (np.cross(np.cross(ra, nor) / body_a.I, ra)) + (np.cross(np.cross(rb, nor) / body_b.I, rb))))
                             j = num / denom
 
                             # Velocity / Angular Velocity Update
@@ -791,17 +807,25 @@ def run():
                             body_a.v += j * nor[:-1] / body_a.m
                             body_b.v -= j * nor[:-1] / body_b.m
 
-                            # else:
-                            #     print('Uh oh, multiple points. Not sure how to handle.')
+                            all_separating = False
+                            print('Updated that point.')
 
-                        # 2. Resting Contact
+                        # 2. Resting Contact (sadly will never be the case, as gravity always adds velocity)
                         elif -eps < v_rel < eps:
+                            print('resting contact')
                             pass  # RESTING
 
                         # 3. Separating Contact
                         else:
+                            print('Already separating!!')
                             pass  # Nothing to do, separating
 
+            # Finally, set new positions based on old positions + newly resolved velocities
+            for b in bodies:
+                b.solve_based_on_old(dt)
+
+
+            # print('Computation time:', time.time() - start_time)
             # print('Number of planes:', len(plane_points))
             # print('Number cached:', len(separating_planes.keys()))
 
@@ -874,15 +898,15 @@ def run():
             # for points in plane_points:
             #     w.create_line(*points, fill='orange', width=3)
 
-            # Draw all collision points
-            radius = 10
-            for pt in collision_points:
-                w.create_oval(*A(pt - radius), *A(pt + radius), fill='red')
+            # Draw all collision points (doesn't work properly atm)
+            # radius = 10
+            # for pt in collision_points:
+            #     w.create_oval(*A(pt - radius), *A(pt + radius), fill='red')
 
         # End run
         w.update()
         print('Frame', count)
-        time.sleep(dt)
+        time.sleep(0 if mode == 2 else dt)
         # if count > 470:# 130:
         #     time.sleep(dt * 100)
         # else:
