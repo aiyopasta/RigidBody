@@ -25,7 +25,7 @@ import matplotlib.pyplot as plt
 np.set_printoptions(suppress=True)
 
 # Window size. Note: 1920/2 = 960 will be the width of each half of the display (2D | 3D)
-window_w = 1700
+window_w = 1000#1700
 window_h = 1000
 
 # Tkinter Setup
@@ -57,7 +57,7 @@ def R(theta: float):
 
 class RigidBody:
     def __init__(self, points, init_xy=np.array([0., 0.]), init_v=np.array([0., 0.]), init_theta=0., init_omega=0.,
-                 mass=1., inertia=500., solver_id=0, id='none'):
+                 mass=1., inertia=0., solver_id=0, id='none'):
         '''
             points: A python list of n numpy arrays of size 2 comprising the vertices of the body in cc order.
                     (IN BODY REFERENCE FRAME).
@@ -77,7 +77,7 @@ class RigidBody:
         self.old_xy = np.array([0., 0.])
         self.old_theta = 0.
         self.m = mass
-        self.I = inertia
+        self.I = self.compute_moment_inertia() if inertia == 0. else inertia
         self.ID = id
 
         self.n = 0  # number of times solved (useful for t0 ODE solver)
@@ -98,6 +98,22 @@ class RigidBody:
             centroid += ((p0 + p1 + p2) / 3.) * area
 
         return centroid / total_area
+
+    # Moment of inertia scalar computation (in principle, this works for even non-convex polygons)
+    def compute_moment_inertia(self):
+        # Shoelace theorems for polygon area &
+        Ix, Iy, area = 0., 0., 0.
+        for i, pt in enumerate(self.points):
+            pt_before, pt_after = self.points[(i - 1) % len(self.points)], self.points[(i + 1) % len(self.points)]
+            area += pt[0] * (pt_after[1] - pt_before[1])
+            factor = (pt[0] * pt_after[1]) - (pt_after[0] * pt[1])
+            Ix += factor * (np.power(pt[1], 2.0) + (pt[1] * pt_after[1]) + np.power(pt_after[1], 2.0))
+            Iy += factor * (np.power(pt[0], 2.0) + (pt[0] * pt_after[0]) + np.power(pt_after[0], 2.0))
+
+        area /= 2.0
+        # Need to subtract by md^2 (parallel axis theorem) as without it, this is inertia wrt the origin
+        return (self.m * (Ix + Iy) / (12.0 * area)) - (self.m * np.linalg.norm(self.centroid))
+
 
     # Compute the top-left and bottom-right of bbox
     # IN THE SHAPE'S REFERENCE FRAME! (In the usual space of (0, 0) being at the center of the screen).
@@ -383,8 +399,8 @@ def vectorfield_potential(xy: np.ndarray):
 
 
 # Mode 2 Parameters
-restitution_coeff = 0.6
-grav_const = -1000.0
+restitution_coeff = 0.9
+grav_const = -800.0
 
 
 class Endpoint:
@@ -610,17 +626,77 @@ def run():
         initial_energies = copy.copy(energies)
 
     elif mode == 2:
-        # Spawn 3 bodies heading towards each other, and sort them by bbox
+        # Spawn many bodies heading towards each other, and sort them by bbox
+        # # INCLINED PLANE (for adding in friction)
+        # eps = 200
+        # verts = [[-window_w/2 + eps, -window_h/2 + eps], [window_w/2 - eps, -window_h/2 + eps], [window_w/2 - eps, 100]]
+        # plane = RigidBody(np.array(verts), init_xy=np.array([0., 0.]), init_v=np.array([0., 0.]), init_theta=np.pi/20, init_omega=0., solver_id=1)
+        # bodies.append(plane)
+        #
+        # verts = regular_ngon_verts(4, sidelen=80)
+        # xy0 = np.array([0., 400.])
+        # block = RigidBody(verts, init_xy=xy0, init_v=np.array([0., 0.]), init_theta=np.pi / 4 + 0.1, init_omega=0., solver_id=1)
+        # bodies.append(block)
+        # for i, body in enumerate(bodies):
+        #     x_sorted_endpoints.extend([Endpoint(i, body.get_endpoint_val(0), 0),
+        #                                Endpoint(i, body.get_endpoint_val(0), 1)])
+        #     y_sorted_endpoints.extend([Endpoint(i, body.get_endpoint_val(2), 2),
+        #                                Endpoint(i, body.get_endpoint_val(3), 3)])
+        # n_bodies = len(bodies)
+
+        # # TOWER ——————————————————————————————————————————————————————————————————————
+        # center = np.array([0., 0.])
+        # eps = 40
+        # # BOTTOM ROW
+        # for i in range(-1,2):
+        #     verts = regular_ngon_verts(4, sidelen=80)
+        #     xy0 = center + np.array([-200. * i, (-window_h / 2) + eps * 3])
+        #     block = RigidBody(verts, init_xy=xy0, init_v=np.array([0., 0.]), init_theta=np.pi/4 + 0.1, init_omega=0., solver_id=1)
+        #     bodies.append(block)
+        # # MIDDLE PANEL
+        # verts = [[-window_w/2 + eps * 7, eps/2], [-window_w/2 + eps * 7, -eps/2], [window_w/2 - eps * 7, -eps/2], [window_w/2 - eps * 7, eps/2]]
+        # xy0 = center + np.array([0., -200])
+        # block = RigidBody(verts, init_xy=xy0, init_v=np.array([0., 0.]), init_theta=0., init_omega=0., solver_id=1)
+        # bodies.append(block)
+        # # MIDDLE ROW
+        # for i in [-1, 1]:
+        #     verts = regular_ngon_verts(4, sidelen=60)
+        #     xy0 = center + np.array([-100. * i, 0])
+        #     block = RigidBody(verts, init_xy=xy0, init_v=np.array([0., 0.]), init_theta=np.pi/4 + 0.1, init_omega=0., solver_id=1)
+        #     bodies.append(block)
+        # # MIDDLE PANEL 2
+        # verts = [[-window_w/2 + eps * 10, eps/2], [-window_w/2 + eps * 10, -eps/2], [window_w/2 - eps * 10, -eps/2], [window_w/2 - eps * 10, eps/2]]
+        # xy0 = center + np.array([0., 200])
+        # block = RigidBody(verts, init_xy=xy0, init_v=np.array([0., 0.]), init_theta=0., init_omega=0., solver_id=1)
+        # bodies.append(block)
+        # # TOP BLOCK
+        # verts = regular_ngon_verts(4, sidelen=60)
+        # xy0 = center + np.array([0., 400.])
+        # block = RigidBody(verts, init_xy=xy0, init_v=np.array([0., 0.]), init_theta=np.pi / 4 + 0.1, init_omega=0., solver_id=1)
+        # bodies.append(block)
+        # # SMASHER
+        # verts = regular_ngon_verts(5, sidelen=60)
+        # xy0 = center + np.array([-300., 300])
+        # block = RigidBody(verts, init_xy=xy0, init_v=np.array([50., 200.]), init_theta=0., init_omega=1., solver_id=1, mass=50)
+        # bodies.append(block)
+        # for i, body in enumerate(bodies):
+        #     x_sorted_endpoints.extend([Endpoint(i, body.get_endpoint_val(0), 0),
+        #                                Endpoint(i, body.get_endpoint_val(0), 1)])
+        #     y_sorted_endpoints.extend([Endpoint(i, body.get_endpoint_val(2), 2),
+        #                                Endpoint(i, body.get_endpoint_val(3), 3)])
+        # n_bodies = len(bodies)
+
+        # RANDOM TOSS ————————————————————————————————————————————————————————————————
         center = np.array([0, 0])
         radius = 400
-        n_bodies = 20
+        n_bodies = 14
         for i in range(n_bodies):
             # Create the rigid body
             theta = 2.0 * np.pi * float(i) / n_bodies
             xy0 = radius * np.array([np.cos(theta), np.sin(theta)])
             v0 = (normalize(center - xy0) * 200.0) + np.array([0, 600 if gravity else 0])
-            verts = regular_ngon_verts(4, sidelen=60)  #np.random.randint(3, 6+1)
-            body = RigidBody(verts, init_xy=xy0, init_v=v0, init_theta=np.pi / 6, init_omega=1.0, solver_id=1)  # init_omega=np.pi / 5 * (i + 1)
+            verts = regular_ngon_verts(np.random.randint(3, 6+1), sidelen=80)
+            body = RigidBody(verts, init_xy=xy0, init_v=v0, init_theta=np.pi / 6, init_omega=np.pi / 5 * (i + 1), solver_id=1)
             bodies.append(body)
             # Add its bbox endpoints to the lists (currently will be unsorted)
             x_sorted_endpoints.extend([Endpoint(i, body.get_endpoint_val(0), 0),
@@ -757,7 +833,9 @@ def run():
 
             # Iterative collective collision resolution
             all_separating = False
-            while not all_separating:
+            i = 0
+            while not all_separating and i < 10:
+                i += 1
                 all_separating = True
                 plane_points.clear()  # every iteration the points change (for drawing)
                 for pair in legit_contacts:
